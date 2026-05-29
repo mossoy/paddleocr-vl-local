@@ -1,5 +1,7 @@
 const API_BASE = '/api';
-const PDF_BATCH_SIZE = 1;
+const DEFAULT_PDF_BATCH_SIZE = 1;
+const MAX_PDF_BATCH_SIZE = 600;
+const PDF_BATCH_SIZE_STORAGE_KEY = 'pandocr.pdfBatchSize';
 
 let availableModel = 'PaddleOCR-VL-1.6-0.9B';
 let tasks = [];
@@ -60,11 +62,13 @@ const els = {
     ignoreHeaderSwitch: document.getElementById('ignore-header-switch'),
     ignoreFooterSwitch: document.getElementById('ignore-footer-switch'),
     ignoreNumberSwitch: document.getElementById('ignore-number-switch'),
+    pdfBatchSizeInput: document.getElementById('pdf-batch-size-input'),
     taskTemplate: document.getElementById('task-item-template')
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    initPdfBatchSizeSetting();
     setupEventListeners();
     await checkBackendConnection();
     await loadTasks();
@@ -117,6 +121,9 @@ function setupEventListeners() {
     els.zoomOutBtn.addEventListener('click', () => changeZoom(-0.15));
     els.sourceViewer.addEventListener('scroll', updateCurrentPageFromScroll);
     els.jsonView.addEventListener('scroll', renderVisibleJsonLines);
+    ['change', 'blur'].forEach((eventName) => {
+        els.pdfBatchSizeInput?.addEventListener(eventName, syncPdfBatchSizeSetting);
+    });
 
     document.querySelectorAll('.task-tab').forEach((button) => {
         button.addEventListener('click', () => {
@@ -318,8 +325,10 @@ async function createPdfTask(fileOrBlob, name, extra = {}) {
         : null;
     const batches = [];
 
-    for (let startPage = 1; startPage <= pageCount; startPage += PDF_BATCH_SIZE) {
-        const endPage = Math.min(startPage + PDF_BATCH_SIZE - 1, pageCount);
+    const pdfBatchSize = getConfiguredPdfBatchSize();
+
+    for (let startPage = 1; startPage <= pageCount; startPage += pdfBatchSize) {
+        const endPage = Math.min(startPage + pdfBatchSize - 1, pageCount);
         const batchPageCount = endPage - startPage + 1;
         const payloadDataUrl = pageCount === 1
             ? sourceDataUrl
@@ -348,6 +357,7 @@ async function createPdfTask(fileOrBlob, name, extra = {}) {
         updatedAt: now,
         status: 'pending',
         pageCount,
+        pdfBatchSize,
         sourceDataUrl,
         thumbnail,
         batches,
@@ -1561,6 +1571,30 @@ function sourceLabel(task) {
 
 function getExtension(filename) {
     return filename.split('.').pop().toLowerCase();
+}
+
+function initPdfBatchSizeSetting() {
+    if (!els.pdfBatchSizeInput) return;
+    syncPdfBatchSizeSetting();
+}
+
+function syncPdfBatchSizeSetting() {
+    if (!els.pdfBatchSizeInput) return DEFAULT_PDF_BATCH_SIZE;
+    const batchSize = getConfiguredPdfBatchSize();
+    els.pdfBatchSizeInput.value = String(batchSize);
+    localStorage.setItem(PDF_BATCH_SIZE_STORAGE_KEY, String(batchSize));
+    return batchSize;
+}
+
+function getConfiguredPdfBatchSize() {
+    const rawValue = els.pdfBatchSizeInput?.value || localStorage.getItem(PDF_BATCH_SIZE_STORAGE_KEY);
+    return clampPdfBatchSize(rawValue);
+}
+
+function clampPdfBatchSize(value) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return DEFAULT_PDF_BATCH_SIZE;
+    return Math.min(MAX_PDF_BATCH_SIZE, Math.max(1, parsed));
 }
 
 function formatDate(timestamp) {

@@ -298,6 +298,26 @@ svg {
     accent-color: var(--brand);
 }
 
+.setting-number {
+    justify-content: space-between;
+}
+
+.setting-number input {
+    width: 76px;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    color: var(--text);
+    background: #fff;
+    text-align: right;
+}
+
+.setting-number input:focus {
+    outline: 2px solid var(--brand-soft);
+    border-color: var(--brand);
+}
+
 .task-tabs {
     display: flex;
     gap: 14px;
