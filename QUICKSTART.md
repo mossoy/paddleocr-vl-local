@@ -1,6 +1,6 @@
 # 快速开始
 
-完整部署说明统一维护在 `README.md` 的“部署方式”章节；那里分为 NVIDIA Docker 版本和 macOS Apple Silicon 版本。
+完整部署说明统一维护在 `README.zh-CN.md` 的“部署方式”章节；那里分为 NVIDIA Docker 版本和 macOS Apple Silicon 版本。
 
 ## macOS Apple Silicon
 
