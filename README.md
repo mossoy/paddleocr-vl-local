@@ -2,7 +2,7 @@
 
 **Language / 语言**: English | [简体中文](README.zh-CN.md)
 
-PandOCR is a lightweight Web frontend for PaddleOCR-VL. This project is fixed to `PaddleOCR-VL-1.6-0.9B`: the frontend handles file upload, queueing, preview, and download, while the FastAPI backend only serves static files, converts Office files to PDF, and proxies requests. OCR inference runs in a separate PaddleOCR-VL service. The NVIDIA path uses the official Docker services, and the macOS Apple Silicon path uses local PaddleX/MLX services.
+PandOCR is a lightweight Web frontend for PaddleOCR-VL and PP-OCRv6. The frontend handles file upload, queueing, preview, model switching, and download, while the FastAPI backend serves static files, converts Office files to PDF, and proxies requests. OCR inference runs in separate PaddleOCR services. The NVIDIA path uses official Docker services, and the macOS Apple Silicon path uses local PaddleX/MLX services.
 
 ## Current Architecture
 
@@ -13,15 +13,17 @@ Browser
        - static WebUI
        - Office to PDF conversion
        - PaddleOCR-VL request proxy
-  -> PaddleOCR-VL layout-parsing service
-       - NVIDIA: paddleocr-vl-api + paddleocr-vlm-server in docker compose
+       - PP-OCRv6 OCR request proxy
+  -> PaddleOCR services
+       - NVIDIA: paddleocr-vl-api + paddleocr-ocr-api + paddleocr-vlm-server in docker compose
        - macOS: local paddlex --serve, optionally with mlx_vlm.server
 ```
 
-The NVIDIA Compose stack keeps only three services:
+The NVIDIA Compose stack keeps four services:
 
 - `pandocr-web`
 - `paddleocr-vl-api`
+- `paddleocr-ocr-api`
 - `paddleocr-vlm-server`
 
 The project no longer includes rerank/reranker services, and it no longer installs Paddle/PaddleX inside the Web container.
@@ -29,7 +31,9 @@ The project no longer includes rerank/reranker services, and it no longer instal
 ## Features
 
 - Supports image, PDF, PPT/PPTX, and DOC/DOCX uploads.
+- Supports model switching between `PaddleOCR-VL 1.6` document parsing and `PP-OCRv6` text OCR.
 - Sends PDFs to PaddleOCR-VL page by page, making it easier to compare with the official online parsing result and reliably keep the raw JSON for each page.
+- Renders PP-OCRv6 results with an official-style visual OCR layer: source/result pages stay aligned, scrolling and zooming are synchronized, recognized text can be copied or corrected, and raw JSON remains available.
 - Persists parsing tasks locally under `data/tasks/`, so history remains available after refreshing the page. Deleting a task also removes the local record.
 - Markdown preview supports horizontally scrollable tables, KaTeX math rendering, and correction for literal `\n` line breaks in OCR output.
 - Supports parsing options including layout detection, chart recognition, document rectification, orientation recognition, seal recognition, formula numbering, and Markdown tag ignoring.
@@ -74,7 +78,7 @@ The commands below use `env.txt` for RTX 50 series as an example. For RTX 30/40 
 
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
-docker compose --env-file env.txt build pandocr-web
+docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 docker compose --env-file env.txt up -d
 ```
 
@@ -82,6 +86,7 @@ Open:
 
 - WebUI: http://localhost:8000
 - PaddleOCR-VL API health: http://localhost:8081/health
+- PP-OCRv6 API health: http://localhost:8082/health
 
 By default, Compose binds the WebUI and PaddleOCR-VL API only to `127.0.0.1` to avoid unauthorized LAN access. If you need access from another machine, confirm your network access controls first, then adjust the port bindings in `docker-compose.yml` and `PANDOCR_CORS_ORIGINS`.
 
@@ -101,6 +106,7 @@ VLM_BACKEND=vllm
 VLM_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-sm120-offline
 PANDOCR_GPU_DEVICE_ID=0
 PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
+PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
 PADDLE_REQUEST_TIMEOUT=3600
 PANDOCR_CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
 PANDOCR_MAX_UPLOAD_MB=512
@@ -231,7 +237,7 @@ Complex PDFs, table/formula-heavy pages, large images, and native mode will be n
 ## Main APIs
 
 - `GET /`: WebUI home page.
-- `GET /api/models`: Returns the current model name.
+- `GET /api/models`: Returns available models and their proxy endpoints.
 - `GET /api/tasks`: Reads the local persistent task summary list without returning large source files or OCR results.
 - `GET /api/tasks/{task_id}`: Reads the full details of one task.
 - `PUT /api/tasks/{task_id}`: Saves one task to `data/tasks/`.
@@ -239,6 +245,7 @@ Complex PDFs, table/formula-heavy pages, large images, and native mode will be n
 - `DELETE /api/tasks`: Clears local task history.
 - `POST /api/convert/to-pdf`: Converts PPT/PPTX/DOC/DOCX to PDF.
 - `POST /api/paddleocr-vl-1.6`: Proxies OCR requests to the PaddleOCR-VL layout-parsing service.
+- `POST /api/pp-ocrv6`: Proxies OCR requests to the PP-OCRv6 service and returns page images, recognized text lines, boxes, scores, and raw JSON.
 
 ## Project Structure
 
@@ -251,10 +258,12 @@ Complex PDFs, table/formula-heavy pages, large images, and native mode will be n
 |-- macos-one-click.command
 |-- windows-one-click.bat
 |-- Dockerfile
+|-- Dockerfile.ocr
 |-- docker-compose.yml
 |-- data/                  # Local task data directory, not committed by default
 |-- env.txt
 |-- env.docker
+|-- pipeline_config_ocr_v6.yaml
 |-- pipeline_config_vllm.yaml
 |-- pipeline_config_macos_mlx.template.yaml
 |-- scripts/               # Deployment helper scripts
@@ -271,7 +280,7 @@ Complex PDFs, table/formula-heavy pages, large images, and native mode will be n
 
 ## Local Development
 
-When running `server.py` locally, you need an existing PaddleOCR-VL service listening at `http://localhost:8081/layout-parsing`.
+When running `server.py` locally, you need an existing PaddleOCR-VL service listening at `http://localhost:8081/layout-parsing`. To use PP-OCRv6 locally, also start a PaddleX OCR service at `http://localhost:8082/ocr` or set `PADDLE_OCR_SERVICE_URL`.
 
 ```powershell
 pip install -r requirements.txt

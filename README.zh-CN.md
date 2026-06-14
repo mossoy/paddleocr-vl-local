@@ -2,7 +2,7 @@
 
 **语言 / Language**: [English](README.md) | 简体中文
 
-PandOCR 是一个面向 PaddleOCR-VL 的轻量 Web 前端。当前项目固定部署 `PaddleOCR-VL-1.6-0.9B`，前端负责文件上传、队列、预览和下载，后端 FastAPI 只做静态文件服务、Office 转 PDF 和请求代理；OCR 推理由独立 PaddleOCR-VL 服务完成，NVIDIA 路线使用官方 Docker 服务，macOS Apple Silicon 路线使用本地 PaddleX/MLX 服务。
+PandOCR 是一个面向 PaddleOCR-VL 和 PP-OCRv6 的轻量 Web 前端。前端负责文件上传、队列、预览、模型切换和下载，后端 FastAPI 做静态文件服务、Office 转 PDF 和请求代理；OCR 推理由独立 PaddleOCR 服务完成，NVIDIA 路线使用官方 Docker 服务，macOS Apple Silicon 路线使用本地 PaddleX/MLX 服务。
 
 ## 当前架构
 
@@ -13,15 +13,17 @@ Browser
        - static WebUI
        - Office to PDF conversion
        - PaddleOCR-VL request proxy
-  -> PaddleOCR-VL layout-parsing service
-       - NVIDIA: docker compose 中的 paddleocr-vl-api + paddleocr-vlm-server
+       - PP-OCRv6 OCR request proxy
+  -> PaddleOCR services
+       - NVIDIA: docker compose 中的 paddleocr-vl-api + paddleocr-ocr-api + paddleocr-vlm-server
        - macOS: 本地 paddlex --serve，可选 mlx_vlm.server
 ```
 
-NVIDIA Compose 只保留 3 个服务：
+NVIDIA Compose 保留 4 个服务：
 
 - `pandocr-web`
 - `paddleocr-vl-api`
+- `paddleocr-ocr-api`
 - `paddleocr-vlm-server`
 
 项目不再包含 rerank/reranker 服务，也不再在 Web 容器里安装 Paddle/PaddleX。
@@ -29,7 +31,9 @@ NVIDIA Compose 只保留 3 个服务：
 ## 功能
 
 - 支持图片、PDF、PPT/PPTX、DOC/DOCX 上传。
+- 支持在 `PaddleOCR-VL 1.6` 文档解析和 `PP-OCRv6` 文字识别之间自由切换。
 - PDF 按页发送给 PaddleOCR-VL，便于对齐官方在线解析结果并稳定保留每页原始 JSON。
+- PP-OCRv6 结果使用接近官方的可视化文字层展示：左右页面对齐，上下/左右滚动和缩放同步，识别文字支持复制和纠正，同时保留原始 JSON。
 - 解析任务会持久化到本机 `data/tasks/`，刷新页面后仍可查看历史任务，删除按钮会同步删除本地记录。
 - Markdown 预览支持表格横向滚动、KaTeX 数学公式渲染、OCR 结果中的字面量 `\n` 换行修正。
 - 支持解析选项：版面检测、图表识别、文档矫正、方向识别、印章识别、公式编号、Markdown 忽略标签等。
@@ -74,7 +78,7 @@ Windows + NVIDIA 用户推荐直接使用一键部署脚本：
 
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
-docker compose --env-file env.txt build pandocr-web
+docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 docker compose --env-file env.txt up -d
 ```
 
@@ -82,6 +86,7 @@ docker compose --env-file env.txt up -d
 
 - WebUI: http://localhost:8000
 - PaddleOCR-VL API health: http://localhost:8081/health
+- PP-OCRv6 API health: http://localhost:8082/health
 
 Compose 默认只把 WebUI 和 PaddleOCR-VL API 绑定到 `127.0.0.1`，避免局域网内未授权访问。如果需要给其他机器访问，请先确认网络访问控制，再调整 `docker-compose.yml` 的端口绑定和 `PANDOCR_CORS_ORIGINS`。
 
@@ -101,6 +106,7 @@ VLM_BACKEND=vllm
 VLM_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-sm120-offline
 PANDOCR_GPU_DEVICE_ID=0
 PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
+PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
 PADDLE_REQUEST_TIMEOUT=3600
 PANDOCR_CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
 PANDOCR_MAX_UPLOAD_MB=512
@@ -231,7 +237,7 @@ PANDOCR_PORT=18000 make mac-up
 ## 主要接口
 
 - `GET /`：WebUI 首页。
-- `GET /api/models`：返回当前模型名。
+- `GET /api/models`：返回可用模型和对应代理入口。
 - `GET /api/tasks`：读取本机持久化任务摘要列表，不返回大体积源文件和 OCR 结果。
 - `GET /api/tasks/{task_id}`：读取一个任务的完整详情。
 - `PUT /api/tasks/{task_id}`：保存一个任务到 `data/tasks/`。
@@ -239,6 +245,7 @@ PANDOCR_PORT=18000 make mac-up
 - `DELETE /api/tasks`：清空本地任务历史。
 - `POST /api/convert/to-pdf`：将 PPT/PPTX/DOC/DOCX 转为 PDF。
 - `POST /api/paddleocr-vl-1.6`：代理 OCR 请求到 PaddleOCR-VL layout-parsing 服务。
+- `POST /api/pp-ocrv6`：代理 OCR 请求到 PP-OCRv6 服务，返回页面图片、识别文字行、坐标框、置信度和原始 JSON。
 
 ## 项目结构
 
@@ -251,10 +258,12 @@ PANDOCR_PORT=18000 make mac-up
 ├── macos-one-click.command
 ├── windows-one-click.bat
 ├── Dockerfile
+├── Dockerfile.ocr
 ├── docker-compose.yml
 ├── data/                  # 本地任务数据目录，默认不提交
 ├── env.txt
 ├── env.docker
+├── pipeline_config_ocr_v6.yaml
 ├── pipeline_config_vllm.yaml
 ├── pipeline_config_macos_mlx.template.yaml
 ├── scripts/               # 部署辅助脚本
@@ -271,7 +280,7 @@ PANDOCR_PORT=18000 make mac-up
 
 ## 本地开发
 
-本地运行 `server.py` 时，需要已有 PaddleOCR-VL 服务监听在 `http://localhost:8081/layout-parsing`。
+本地运行 `server.py` 时，需要已有 PaddleOCR-VL 服务监听在 `http://localhost:8081/layout-parsing`。如需使用 PP-OCRv6，也需要启动 PaddleX OCR 服务监听在 `http://localhost:8082/ocr`，或设置 `PADDLE_OCR_SERVICE_URL`。
 
 ```powershell
 pip install -r requirements.txt

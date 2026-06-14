@@ -26,6 +26,8 @@ class ServerTaskApiTests(unittest.TestCase):
             "id": "task_123",
             "name": "sample.pdf",
             "sourceKind": "pdf",
+            "modelId": "pp-ocrv6",
+            "modelName": "PP-OCRv6",
             "size": 1200,
             "createdAt": 100,
             "updatedAt": 200,
@@ -48,6 +50,8 @@ class ServerTaskApiTests(unittest.TestCase):
         self.assertEqual(list_response.status_code, 200)
         summary = list_response.json()["tasks"][0]
         self.assertEqual(summary["id"], "task_123")
+        self.assertEqual(summary["modelId"], "pp-ocrv6")
+        self.assertEqual(summary["modelName"], "PP-OCRv6")
         self.assertEqual(summary["completedPages"], 1)
         self.assertTrue(summary["hasMarkdown"])
         self.assertNotIn("sourceDataUrl", summary)
@@ -61,6 +65,13 @@ class ServerTaskApiTests(unittest.TestCase):
         self.assertEqual(detail["batches"], task["batches"])
         self.assertTrue(detail["detailLoaded"])
 
+    def test_model_list_includes_vl_and_ppocrv6(self):
+        response = self.client.get("/api/models")
+        self.assertEqual(response.status_code, 200)
+        model_ids = [model["id"] for model in response.json()["data"]]
+        self.assertIn("paddleocr-vl-1.6", model_ids)
+        self.assertIn("pp-ocrv6", model_ids)
+
     def test_invalid_task_id_is_rejected(self):
         response = self.client.get("/api/tasks/bad!")
         self.assertEqual(response.status_code, 400)
@@ -69,6 +80,33 @@ class ServerTaskApiTests(unittest.TestCase):
         large_payload = {"image": "x" * (2 * 1024 * 1024), "fileType": 1}
         response = self.client.post("/api/paddleocr-vl-1.6", json=large_payload)
         self.assertEqual(response.status_code, 413)
+
+    def test_ppocr_response_is_normalized_for_existing_frontend(self):
+        response = self.server.parse_ppocr_response(
+            {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "inputImage": "base64-page-image",
+                            "prunedResult": {
+                                "page_index": 0,
+                                "rec_texts": ["Hello", "World"],
+                                "rec_scores": [0.98, 0.95],
+                                "rec_boxes": [[1, 2, 30, 10], [1, 14, 40, 22]],
+                            }
+                        }
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(response["markdown"], "Hello\nWorld")
+        self.assertEqual(len(response["layoutParsingResults"]), 1)
+        page = response["layoutParsingResults"][0]
+        self.assertEqual(page["parser"], "pp-ocrv6")
+        self.assertEqual(page["pageImage"], "base64-page-image")
+        self.assertEqual(page["ocrLines"][0]["text"], "Hello")
+        self.assertEqual(page["ocrLines"][0]["box"], [1, 2, 30, 10])
 
     def test_task_source_is_stored_outside_task_json_and_page_ranges_can_be_read(self):
         writer = PdfWriter()

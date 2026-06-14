@@ -25,6 +25,7 @@ VLM_BACKEND=vllm
 VLM_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-sm120-offline
 PANDOCR_GPU_DEVICE_ID=0
 PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
+PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
 PADDLE_REQUEST_TIMEOUT=3600
 EOF
 fi
@@ -32,8 +33,8 @@ fi
 echo "Pulling PaddleOCR-VL images..."
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
 
-echo "Building pandocr-web..."
-docker compose --env-file env.txt build pandocr-web
+echo "Building local images..."
+docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 
 echo "Build complete."
 echo ""

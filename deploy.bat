@@ -35,10 +35,18 @@ if not errorlevel 1 (
     echo paddleocr-vl-api ^(8081^) not ready
 )
 
+curl -f http://localhost:8082/health >nul 2>&1
+if not errorlevel 1 (
+    echo paddleocr-ocr-api ^(8082^) OK
+) else (
+    echo paddleocr-ocr-api ^(8082^) not ready
+)
+
 echo.
 echo Done.
 echo WebUI: http://localhost:8000
-echo API:   http://localhost:8081
+echo VL API:  http://localhost:8081
+echo OCR API: http://localhost:8082
 echo.
 echo Useful commands:
 echo   docker compose --env-file env.txt logs -f

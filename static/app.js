@@ -2,8 +2,20 @@ const API_BASE = '/api';
 const DEFAULT_PDF_BATCH_SIZE = 1;
 const MAX_PDF_BATCH_SIZE = 400;
 const PDF_BATCH_SIZE_STORAGE_KEY = 'pandocr.pdfBatchSize';
+const MODEL_STORAGE_KEY = 'pandocr.selectedModelId';
+const DEFAULT_MODEL_ID = 'paddleocr-vl-1.6';
+const DEFAULT_PDF_ZOOM = 1;
+const PDF_DEFAULT_PAGE_WIDTH = 595;
+const PDF_FIT_WIDTH_GUTTER = 12;
+const MAX_DEFAULT_PDF_ZOOM = 1.3;
 
-let availableModel = 'PaddleOCR-VL-1.6-0.9B';
+let availableModels = [{
+    id: DEFAULT_MODEL_ID,
+    name: 'PaddleOCR-VL-1.6-0.9B',
+    label: 'PaddleOCR-VL 1.6',
+    endpoint: '/api/paddleocr-vl-1.6'
+}];
+let selectedModelId = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL_ID;
 let tasks = [];
 let activeTaskId = null;
 let activeFilter = 'all';
@@ -11,15 +23,20 @@ let activeResultView = 'markdown';
 let isProcessing = false;
 let currentPdf = null;
 let currentPage = 1;
-let currentZoom = 1.15;
+let currentZoom = DEFAULT_PDF_ZOOM;
+let pdfDefaultPageWidth = PDF_DEFAULT_PAGE_WIDTH;
 let sourceRenderToken = 0;
 let renderedResultTaskId = null;
 let renderedMarkdownKey = '';
 let renderedOfficialLayoutContext = '';
+let renderedPPOCRVisualContext = '';
 let renderedJsonKey = '';
 let cachedJsonLines = [];
 let cachedJsonMaxLineLength = 0;
 let jsonRenderToken = 0;
+let ppocrScrollSyncFrame = 0;
+let sourceScrollSyncFrame = 0;
+let splitScrollSyncLocked = false;
 const sourcePdfCache = new Map();
 const sourceBytesCache = new Map();
 const JSON_LINE_HEIGHT = 21;
@@ -41,7 +58,9 @@ const els = {
     clearHistoryBtn: document.getElementById('clear-history-btn'),
     statusDot: document.getElementById('model-status-dot'),
     statusText: document.getElementById('model-status-text'),
+    modelSelect: document.getElementById('model-select'),
     activeModelName: document.getElementById('active-model-name'),
+    resultPane: document.querySelector('.result-pane'),
     sourceTitle: document.getElementById('source-title'),
     sourceMeta: document.getElementById('source-meta'),
     sourceViewer: document.getElementById('source-viewer'),
@@ -51,6 +70,7 @@ const els = {
     nextPageBtn: document.getElementById('next-page-btn'),
     zoomInBtn: document.getElementById('zoom-in-btn'),
     zoomOutBtn: document.getElementById('zoom-out-btn'),
+    resetZoomBtn: document.getElementById('reset-zoom-btn'),
     resultTitle: document.getElementById('result-title'),
     startBtn: document.getElementById('start-btn'),
     copyBtn: document.getElementById('copy-btn'),
@@ -73,6 +93,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/vendor/pdfjs/pdf.worker.min.js';
     initPdfBatchSizeSetting();
     setupEventListeners();
+    renderModelSelect();
     await checkBackendConnection();
     await loadTasks();
     renderTaskList();
@@ -122,8 +143,11 @@ function setupEventListeners() {
     els.nextPageBtn.addEventListener('click', () => changePdfPage(1));
     els.zoomInBtn.addEventListener('click', () => changeZoom(0.15));
     els.zoomOutBtn.addEventListener('click', () => changeZoom(-0.15));
-    els.sourceViewer.addEventListener('scroll', updateCurrentPageFromScroll);
+    els.resetZoomBtn?.addEventListener('click', resetZoom);
+    els.sourceViewer.addEventListener('scroll', handleSourceViewerScroll);
+    els.markdownView.addEventListener('scroll', handlePPOCRMarkdownScroll);
     els.jsonView.addEventListener('scroll', renderVisibleJsonLines);
+    els.modelSelect?.addEventListener('change', handleModelSelectionChange);
     els.pdfBatchSizeInput?.addEventListener('input', handlePdfBatchSizeInput);
     ['change', 'blur'].forEach((eventName) => {
         els.pdfBatchSizeInput?.addEventListener(eventName, syncPdfBatchSizeSetting);
@@ -150,15 +174,115 @@ async function checkBackendConnection() {
         const response = await fetch(`${API_BASE}/models`);
         if (!response.ok) throw new Error('API Error');
         const data = await response.json();
-        availableModel = data.data?.[0]?.id || availableModel;
+        availableModels = normalizeModelList(data);
+        if (!availableModels.some((model) => model.id === selectedModelId)) {
+            selectedModelId = data.default || availableModels[0]?.id || DEFAULT_MODEL_ID;
+        }
+        localStorage.setItem(MODEL_STORAGE_KEY, selectedModelId);
+        renderModelSelect();
         els.statusDot.className = 'dot connected';
-        els.statusText.textContent = availableModel;
-        els.activeModelName.textContent = availableModel.replace('PaddleOCR-', '');
+        updateActiveModelDisplay(getActiveTask());
     } catch (error) {
         els.statusDot.className = 'dot error';
         els.statusText.textContent = '模型未连接';
         setTimeout(checkBackendConnection, 5000);
     }
+}
+
+function normalizeModelList(data) {
+    const models = Array.isArray(data?.data) ? data.data : [];
+    if (!models.length) return availableModels;
+
+    return models.map((model) => {
+        if (typeof model === 'string') {
+            return {
+                id: model,
+                name: model,
+                label: model,
+                endpoint: '/api/paddleocr-vl-1.6'
+            };
+        }
+        return {
+            id: model.id || model.name || DEFAULT_MODEL_ID,
+            name: model.name || model.id || DEFAULT_MODEL_ID,
+            label: model.label || model.name || model.id || DEFAULT_MODEL_ID,
+            endpoint: model.endpoint || '/api/paddleocr-vl-1.6',
+            kind: model.kind || 'document_parsing'
+        };
+    });
+}
+
+function renderModelSelect() {
+    if (!els.modelSelect) return;
+    els.modelSelect.innerHTML = '';
+    availableModels.forEach((model) => {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = modelDisplayName(model);
+        option.selected = model.id === selectedModelId;
+        els.modelSelect.appendChild(option);
+    });
+}
+
+function handleModelSelectionChange() {
+    selectedModelId = els.modelSelect.value || DEFAULT_MODEL_ID;
+    localStorage.setItem(MODEL_STORAGE_KEY, selectedModelId);
+    updateActiveModelDisplay(getActiveTask());
+}
+
+function getSelectedModel() {
+    return availableModels.find((model) => model.id === selectedModelId)
+        || availableModels[0]
+        || {
+            id: DEFAULT_MODEL_ID,
+            name: 'PaddleOCR-VL-1.6-0.9B',
+            label: 'PaddleOCR-VL 1.6',
+            endpoint: '/api/paddleocr-vl-1.6'
+        };
+}
+
+function getTaskModel(task) {
+    if (task?.modelId) {
+        const known = availableModels.find((model) => model.id === task.modelId);
+        if (known) return known;
+        return {
+            id: task.modelId,
+            name: task.modelName || task.modelId,
+            label: task.modelName || task.modelId,
+            endpoint: task.modelEndpoint || '/api/paddleocr-vl-1.6'
+        };
+    }
+    return getSelectedModel();
+}
+
+function modelDisplayName(model) {
+    return model?.label || model?.name || model?.id || DEFAULT_MODEL_ID;
+}
+
+function modelShortName(model) {
+    return modelDisplayName(model).replace('PaddleOCR-', '').replace('PaddleOCR ', '');
+}
+
+function modelApiUrl(model) {
+    const endpoint = model?.endpoint || '/api/paddleocr-vl-1.6';
+    if (/^https?:\/\//i.test(endpoint)) return endpoint;
+    if (endpoint.startsWith('/api/')) return endpoint;
+    return `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+}
+
+function updateActiveModelDisplay(task = null) {
+    const selectedModel = getSelectedModel();
+    const activeModel = task?.modelId ? getTaskModel(task) : selectedModel;
+    els.statusText.textContent = modelDisplayName(selectedModel);
+    els.activeModelName.textContent = modelShortName(activeModel);
+}
+
+function applySelectedModelToTask(task) {
+    const model = getSelectedModel();
+    task.modelId = model.id;
+    task.modelName = modelDisplayName(model);
+    task.modelEndpoint = model.endpoint;
+    return model;
 }
 
 async function saveTask(task) {
@@ -217,7 +341,8 @@ function dedupeTasks(taskItems) {
             task.originalName || '',
             task.sourceKind || '',
             task.size || 0,
-            task.pageCount || 0
+            task.pageCount || 0,
+            task.modelId || ''
         ].join('|');
         const existing = byFingerprint.get(fingerprint);
         if (!existing || (task.updatedAt || 0) > (existing.updatedAt || 0)) {
@@ -390,7 +515,7 @@ async function createImageTask(file) {
     const dataUrl = await readAsDataUrl(file);
     const sourceUrl = await uploadTaskSource(id, file, file.name, file.type || 'application/octet-stream');
     const now = Date.now();
-    return {
+    const task = {
         id,
         name: file.name,
         sourceKind: 'image',
@@ -415,6 +540,8 @@ async function createImageTask(file) {
         images: {},
         ocrResults: []
     };
+    applySelectedModelToTask(task);
+    return task;
 }
 
 async function createPdfTask(fileOrBlob, name, extra = {}) {
@@ -428,7 +555,7 @@ async function createPdfTask(fileOrBlob, name, extra = {}) {
     const batches = createPdfBatchDescriptors(pageCount, pdfBatchSize);
 
     const now = Date.now();
-    return {
+    const task = {
         id,
         name,
         sourceKind: extra.sourceKind || 'pdf',
@@ -447,6 +574,8 @@ async function createPdfTask(fileOrBlob, name, extra = {}) {
         images: {},
         ocrResults: []
     };
+    applySelectedModelToTask(task);
+    return task;
 }
 
 async function uploadTaskSource(taskId, fileOrBlob, filename, mimeType) {
@@ -572,13 +701,26 @@ async function selectTask(taskId) {
     if (activeTaskId !== taskId) return;
     if (!task) return;
     renderTaskList();
+    updateActiveModelDisplay(task);
     els.sourceTitle.textContent = task.name;
     els.sourceMeta.textContent = `${sourceLabel(task)} · ${formatSize(task.size)} · ${task.pageCount || 1} 页`;
     els.resultTitle.textContent = resultPaneTitle(task);
-    renderResultPane(task);
+    const deferPPOCRVisualResult = isPPOCRVisualTask(task) && task.sourceKind !== 'image';
+    if (!deferPPOCRVisualResult) {
+        renderResultPane(task);
+    } else {
+        resetResultRenderCache(task.id);
+        resetResultScrollPositions();
+        updateResultViewLabels(task);
+        syncResultMode(task);
+        showResultView('markdown');
+    }
     updateActionState(task);
     await renderSource(task);
     if (activeTaskId !== taskId) return;
+    if (deferPPOCRVisualResult) {
+        invalidatePPOCRVisualRender();
+    }
     renderResultPane(task);
     updateActionState(task);
 }
@@ -593,6 +735,8 @@ async function renderSource(task) {
     els.pdfControls.classList.add('hidden');
     els.sourceViewer.innerHTML = '';
     els.sourceViewer.scrollTop = 0;
+    els.sourceViewer.scrollLeft = 0;
+    els.markdownView.scrollLeft = 0;
 
     if (task.sourceKind === 'image') {
         const img = document.createElement('img');
@@ -608,11 +752,15 @@ async function renderSource(task) {
         ? await pdfjsLib.getDocument({ data: dataUrlToUint8Array(task.sourceDataUrl) }).promise
         : await pdfjsLib.getDocument(task.sourceUrl).promise;
     if (renderToken !== sourceRenderToken) return;
+    const firstPage = await pdf.getPage(1);
+    if (renderToken !== sourceRenderToken) return;
+    pdfDefaultPageWidth = firstPage.getViewport({ scale: 1 }).width || PDF_DEFAULT_PAGE_WIDTH;
+    currentZoom = getDefaultPdfZoom();
     currentPdf = pdf;
     await renderPdfDocument(renderToken);
 }
 
-async function renderPdfDocument(renderToken = sourceRenderToken) {
+async function renderPdfDocument(renderToken = sourceRenderToken, scrollAnchor = null) {
     if (renderToken !== sourceRenderToken) return;
     if (!currentPdf) return;
     currentPage = Math.min(Math.max(currentPage, 1), currentPdf.numPages);
@@ -645,9 +793,17 @@ async function renderPdfDocument(renderToken = sourceRenderToken) {
         flow.appendChild(wrap);
 
         await page.render({ canvasContext: context, viewport }).promise;
+        if (pageNumber === 1) {
+            renderPPOCRVisualWhenSourceReady(renderToken);
+        }
     }
 
-    scrollPdfPageIntoView(currentPage, 'auto');
+    if (scrollAnchor) {
+        restoreSourceScrollAnchor(scrollAnchor, 'auto');
+    } else {
+        scrollPdfPageIntoView(currentPage, 'auto');
+        resetSplitHorizontalScroll();
+    }
     updateCurrentPageFromScroll();
 }
 
@@ -679,15 +835,23 @@ function resetResultRenderCache(taskId = null) {
     renderedResultTaskId = taskId;
     renderedMarkdownKey = '';
     renderedOfficialLayoutContext = '';
+    renderedPPOCRVisualContext = '';
     renderedJsonKey = '';
     cachedJsonLines = [];
     cachedJsonMaxLineLength = 0;
     jsonRenderToken += 1;
 }
 
+function invalidatePPOCRVisualRender() {
+    renderedMarkdownKey = '';
+    renderedPPOCRVisualContext = '';
+}
+
 function resetResultScrollPositions() {
     els.markdownView.scrollTop = 0;
+    els.markdownView.scrollLeft = 0;
     els.jsonView.scrollTop = 0;
+    els.jsonView.scrollLeft = 0;
 }
 
 function captureResultScrollState() {
@@ -697,6 +861,7 @@ function captureResultScrollState() {
     return {
         element,
         scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
         stickToBottom: bottomOffset <= 32
     };
 }
@@ -709,6 +874,8 @@ function restoreResultScrollState(state) {
         state.element.scrollTop = state.stickToBottom
             ? maxScrollTop
             : Math.min(state.scrollTop, maxScrollTop);
+        const maxScrollLeft = Math.max(0, state.element.scrollWidth - state.element.clientWidth);
+        state.element.scrollLeft = Math.min(state.scrollLeft || 0, maxScrollLeft);
     };
 
     restore();
@@ -726,6 +893,8 @@ function renderResultPane(task, { deferJson = false, preserveScroll = true } = {
     if (!task) {
         resetResultRenderCache();
         resetResultScrollPositions();
+        updateResultViewLabels(null);
+        syncResultMode(null);
         showResultView('markdown');
         els.resultTitle.textContent = '解析结果';
         els.markdownView.innerHTML = '<div class="empty-result">选择左侧任务，或上传一个新文件开始解析。</div>';
@@ -744,6 +913,8 @@ function renderResultPane(task, { deferJson = false, preserveScroll = true } = {
     }
 
     els.resultTitle.textContent = resultPaneTitle(task);
+    updateResultViewLabels(task);
+    syncResultMode(task);
 
     if (activeResultView === 'json') {
         showResultView('json');
@@ -753,9 +924,20 @@ function renderResultPane(task, { deferJson = false, preserveScroll = true } = {
 
     showResultView('markdown');
     const markdownKey = markdownRenderKey(task);
-    if (renderedMarkdownKey === markdownKey) {
+    const ppocrVisualTask = isPPOCRVisualTask(task);
+    const ppocrContext = ppocrVisualTask ? ppocrVisualRenderContext(task) : '';
+    if (renderedMarkdownKey === markdownKey && (!ppocrVisualTask || renderedPPOCRVisualContext === ppocrContext)) {
         warmJsonResultCache(task);
         restoreResultScrollState(scrollState);
+        return;
+    }
+
+    if (ppocrVisualTask) {
+        renderedOfficialLayoutContext = '';
+        clearSourceHighlight();
+        clearSourceHotspots();
+        renderPPOCRVisualResult(task, markdownKey, scrollState);
+        warmJsonResultCache(task);
         return;
     }
 
@@ -849,6 +1031,745 @@ function cacheJsonLines(text) {
     cachedJsonMaxLineLength = cachedJsonLines.reduce((max, line) => Math.max(max, line.length), 0);
 }
 
+function updateResultViewLabels(task) {
+    const markdownTab = document.querySelector('.view-tab[data-view="markdown"]');
+    if (!markdownTab) return;
+    markdownTab.textContent = isPPOCRVisualTask(task) ? '文字识别' : '文档解析';
+}
+
+function syncResultMode(task) {
+    const visualMode = isPPOCRVisualTask(task) && activeResultView === 'markdown';
+    els.resultPane?.classList.toggle('ppocr-result-mode', visualMode);
+    els.markdownView.classList.toggle('ocr-visual-mode', visualMode);
+}
+
+function isPPOCRVisualTask(task) {
+    return task?.modelId === 'pp-ocrv6'
+        || Boolean(task?.ocrResults?.some((pageResult) => pageResult?.parser === 'pp-ocrv6'));
+}
+
+function renderPPOCRVisualWhenSourceReady(renderToken) {
+    if (renderToken !== sourceRenderToken) return;
+    const task = getActiveTask();
+    if (!task || !isPPOCRVisualTask(task) || activeResultView !== 'markdown') return;
+    renderResultPane(task, { preserveScroll: false });
+}
+
+function renderPPOCRVisualResult(task, markdownKey, scrollState = null) {
+    const pages = collectPPOCRVisualPages(task);
+    const context = ppocrVisualRenderContext(task);
+    const visualScrollState = freezeVisualScrollState(scrollState);
+
+    if (!pages.length) {
+        const hasEmptyResult = els.markdownView.children.length === 1
+            && els.markdownView.firstElementChild?.classList.contains('empty-result')
+            && renderedPPOCRVisualContext === context;
+        if (!hasEmptyResult) {
+            els.markdownView.innerHTML = `<div class="empty-result">${escapeHtml(emptyResultText(task))}</div>`;
+        }
+        renderedPPOCRVisualContext = context;
+        renderedMarkdownKey = markdownKey;
+        restoreResultScrollState(visualScrollState);
+        return;
+    }
+
+    const expectedKeys = pages.map(ppocrVisualPageKey);
+    let flow = els.markdownView.querySelector(':scope > .ocr-visual-flow');
+    const existingPages = flow
+        ? Array.from(flow.children).filter((element) => element.classList.contains('ocr-visual-page'))
+        : [];
+    const existingKeys = existingPages.map((element) => element.dataset.pageKey || '');
+    const canAppend = Boolean(flow)
+        && els.markdownView.children.length === 1
+        && renderedPPOCRVisualContext === context
+        && existingKeys.length <= expectedKeys.length
+        && existingKeys.every((key, index) => key === expectedKeys[index]);
+
+    if (!canAppend) {
+        flow = document.createElement('div');
+        flow.className = 'ocr-visual-flow';
+        els.markdownView.replaceChildren(flow);
+        renderedPPOCRVisualContext = context;
+    }
+
+    const startIndex = canAppend ? existingKeys.length : 0;
+    pages.slice(startIndex).forEach((page, offset) => {
+        const pageIndex = startIndex + offset;
+        flow.appendChild(createPPOCRVisualPage(page, pageIndex, expectedKeys[pageIndex]));
+    });
+    renderedMarkdownKey = markdownKey;
+    restoreResultScrollState(visualScrollState);
+}
+
+function freezeVisualScrollState(scrollState) {
+    if (!scrollState) return null;
+    return {
+        ...scrollState,
+        stickToBottom: false
+    };
+}
+
+function ppocrVisualRenderContext(task) {
+    return [
+        task?.id || '',
+        sourceRenderToken,
+        currentZoom
+    ].join(':');
+}
+
+function ppocrVisualPageKey(page) {
+    const firstLine = page.lines[0] || {};
+    const lastLine = page.lines[page.lines.length - 1] || {};
+    const signature = [
+        firstLine.text || '',
+        Array.isArray(firstLine.box) ? firstLine.box.join(',') : '',
+        lastLine.text || '',
+        Array.isArray(lastLine.box) ? lastLine.box.join(',') : ''
+    ].join('|');
+    return [
+        page.pageNumber || '',
+        page.index,
+        page.pageImage ? String(page.pageImage).length : 0,
+        page.lines.length,
+        hashString(signature)
+    ].join(':');
+}
+
+function hashString(value) {
+    let hash = 0;
+    const text = String(value || '');
+    for (let index = 0; index < text.length; index += 1) {
+        hash = ((hash << 5) - hash + text.charCodeAt(index)) >>> 0;
+    }
+    return hash.toString(36);
+}
+
+function collectPPOCRVisualPages(task) {
+    if (!Array.isArray(task?.ocrResults)) return [];
+    return task.ocrResults
+        .map((pageResult, index) => {
+            const lines = collectPPOCRLines(pageResult);
+            const pageImage = pageResult?.pageImage || pageResult?.inputImage || null;
+            return {
+                index,
+                pageNumber: Number(pageResult?.sourcePage || pageResult?.page_index || index + 1),
+                pageImage,
+                lines
+            };
+        })
+        .filter((page) => page.pageImage || page.lines.length > 0)
+        .sort((a, b) => (a.pageNumber - b.pageNumber) || (a.index - b.index));
+}
+
+function collectPPOCRLines(pageResult) {
+    if (Array.isArray(pageResult?.ocrLines)) {
+        return pageResult.ocrLines
+            .map((line, index) => normalizePPOCRLine(line, index))
+            .filter(Boolean);
+    }
+
+    const pruned = pageResult?.prunedResult || pageResult || {};
+    const texts = Array.isArray(pruned.rec_texts) ? pruned.rec_texts : [];
+    const scores = Array.isArray(pruned.rec_scores) ? pruned.rec_scores : [];
+    const boxes = Array.isArray(pruned.rec_boxes) ? pruned.rec_boxes : [];
+    const polys = Array.isArray(pruned.rec_polys) ? pruned.rec_polys : [];
+    return texts.map((text, index) => normalizePPOCRLine({
+        text,
+        score: scores[index],
+        box: boxes[index],
+        poly: polys[index]
+    }, index)).filter(Boolean);
+}
+
+function normalizePPOCRLine(line, index) {
+    const text = String(line?.text || '').trim();
+    if (!text) return null;
+    const box = normalizePPOCRBox(line.box || boxFromPoly(line.poly));
+    if (!box) return null;
+    return {
+        index,
+        text,
+        score: line.score,
+        box
+    };
+}
+
+function boxFromPoly(poly) {
+    if (!Array.isArray(poly) || poly.length === 0) return null;
+    const xs = [];
+    const ys = [];
+    poly.forEach((point) => {
+        if (!Array.isArray(point) || point.length < 2) return;
+        xs.push(Number(point[0]));
+        ys.push(Number(point[1]));
+    });
+    if (!xs.length || !ys.length) return null;
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+function normalizePPOCRBox(box) {
+    if (!Array.isArray(box) || box.length < 4) return null;
+    const values = box.slice(0, 4).map(Number);
+    if (values.some((value) => !Number.isFinite(value))) return null;
+    const [x1, y1, x2, y2] = values;
+    if (x2 <= x1 || y2 <= y1) return null;
+    return values;
+}
+
+function createPPOCRVisualPage(page, pageIndex, pageKey = '') {
+    const pageElement = document.createElement('section');
+    pageElement.className = 'ocr-visual-page';
+    pageElement.dataset.page = String(page.pageNumber || pageIndex + 1);
+    if (pageKey) pageElement.dataset.pageKey = pageKey;
+
+    const stage = document.createElement('div');
+    stage.className = 'ocr-page-stage loading';
+    pageElement.appendChild(stage);
+
+    const toolbar = createPPOCRFloatingToolbar();
+    stage.appendChild(toolbar);
+
+    if (page.pageImage) {
+        const img = document.createElement('img');
+        img.className = 'ocr-page-image';
+        img.alt = `OCR page ${page.pageNumber || pageIndex + 1}`;
+        img.src = imageValueToSrc(page.pageImage);
+        stage.appendChild(img);
+        img.addEventListener('load', () => {
+            stage.classList.remove('loading');
+            layoutPPOCRTextLayer(stage, page, img.naturalWidth, img.naturalHeight, toolbar, img);
+        }, { once: true });
+        img.addEventListener('error', () => {
+            stage.classList.remove('loading');
+            createPPOCRTextOnlyLayer(stage, page.lines, toolbar);
+        }, { once: true });
+    } else {
+        stage.classList.remove('loading');
+        createPPOCRTextOnlyLayer(stage, page.lines, toolbar);
+    }
+
+    return pageElement;
+}
+
+function createPPOCRFloatingToolbar() {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'ocr-floating-toolbar hidden';
+    toolbar.innerHTML = `
+        <button type="button" data-action="copy">
+            <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span data-label>\u590d\u5236</span>
+        </button>
+        <button type="button" data-action="correct">
+            <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            <span data-label>\u7ea0\u6b63</span>
+        </button>
+    `;
+    const handleToolbarAction = async (event) => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        event.stopPropagation();
+        if (event.type === 'pointerdown') {
+            event.preventDefault();
+            toolbar._lastPointerAction = {
+                action: button.dataset.action,
+                time: Date.now()
+            };
+        } else if (
+            toolbar._lastPointerAction?.action === button.dataset.action
+            && Date.now() - toolbar._lastPointerAction.time < 500
+        ) {
+            return;
+        }
+        if (button.dataset.action === 'copy') {
+            await copyPPOCRToolbarText(toolbar, button);
+        }
+        if (button.dataset.action === 'correct') {
+            openPPOCRCorrectionEditor(toolbar);
+        }
+    };
+    toolbar.querySelectorAll('button').forEach((button) => {
+        button.addEventListener('pointerdown', handleToolbarAction);
+        button.addEventListener('click', handleToolbarAction);
+    });
+    return toolbar;
+}
+
+async function copyPPOCRToolbarText(toolbar, button) {
+    const text = toolbar.dataset.text || '';
+    if (!text) return;
+    try {
+        await writeClipboardText(text);
+        flashToolbarButtonLabel(button, '\u5df2\u590d\u5236', '\u590d\u5236');
+    } catch (error) {
+        console.error(error);
+        flashToolbarButtonLabel(button, '\u590d\u5236\u5931\u8d25', '\u590d\u5236');
+    }
+}
+
+async function writeClipboardText(text) {
+    if (navigator.clipboard?.writeText) {
+        try {
+            await navigator.clipboard.writeText(text);
+            return;
+        } catch (error) {
+            console.warn('Clipboard API write failed, falling back to textarea copy.', error);
+        }
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    if (!copied) {
+        throw new Error('copy command failed');
+    }
+}
+
+function flashToolbarButtonLabel(button, text, restoreText) {
+    const label = button.querySelector('[data-label]');
+    if (!label) return;
+    label.textContent = text;
+    window.setTimeout(() => {
+        label.textContent = restoreText;
+    }, 900);
+}
+
+function openPPOCRCorrectionEditor(toolbar) {
+    const stage = toolbar.closest('.ocr-page-stage');
+    const active = toolbar._activePPOCR;
+    if (!stage || !active?.element || !active?.line) return;
+    stage.querySelector('.ocr-correction-popover')?.remove();
+
+    const popover = document.createElement('form');
+    popover.className = 'ocr-correction-popover';
+    popover.innerHTML = `
+        <input type="text" name="text" aria-label="\u7ea0\u6b63\u6587\u5b57">
+        <button type="submit">\u4fdd\u5b58</button>
+        <button type="button" data-action="cancel">\u53d6\u6d88</button>
+    `;
+    const input = popover.querySelector('input');
+    input.value = active.line.text || '';
+    popover.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const nextText = input.value.trim();
+        if (!nextText) return;
+        await applyPPOCRCorrection(active.element, active.line, nextText, toolbar);
+        popover.remove();
+    });
+    popover.querySelector('[data-action="cancel"]').addEventListener('click', () => popover.remove());
+    stage.appendChild(popover);
+
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    const viewerRect = els.markdownView.getBoundingClientRect();
+    const minLeft = viewerRect.left - stageRect.left + 8;
+    const maxLeft = viewerRect.right - stageRect.left - 286;
+    const minTop = viewerRect.top - stageRect.top + 8;
+    const maxTop = viewerRect.bottom - stageRect.top - 48;
+    const left = Math.min(
+        Math.max(toolbarRect.left - stageRect.left, minLeft),
+        Math.max(maxLeft, minLeft)
+    );
+    const top = Math.min(
+        Math.max(toolbarRect.bottom - stageRect.top + 8, minTop),
+        Math.max(maxTop, minTop)
+    );
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+    input.focus();
+    input.select();
+}
+
+async function applyPPOCRCorrection(element, line, nextText, toolbar) {
+    const previousText = line.text || '';
+    if (nextText === previousText) return;
+
+    line.text = nextText;
+    updatePPOCRLineElementText(element, nextText);
+    element.classList.toggle('ocr-text-line-code', isPPOCRCodeToken(nextText));
+    toolbar.dataset.text = nextText;
+    updateStoredPPOCRLineText(line, nextText);
+    fitPPOCRLineElement(element, line);
+    await saveCorrectedPPOCRTask();
+}
+
+function updatePPOCRLineElementText(element, text) {
+    const label = element.querySelector('.ocr-text-line-label');
+    if (label) label.textContent = text;
+    element.title = text;
+    element.setAttribute('aria-label', text);
+}
+
+function updateStoredPPOCRLineText(line, text) {
+    const task = getActiveTask();
+    const pageResult = task?.ocrResults?.[line.pageResultIndex];
+    if (!pageResult) return;
+
+    if (Array.isArray(pageResult.ocrLines) && pageResult.ocrLines[line.index]) {
+        pageResult.ocrLines[line.index].text = text;
+    }
+    const pruned = pageResult.prunedResult || pageResult;
+    if (Array.isArray(pruned?.rec_texts) && pruned.rec_texts[line.index] !== undefined) {
+        pruned.rec_texts[line.index] = text;
+    }
+    task.updatedAt = Date.now();
+}
+
+async function saveCorrectedPPOCRTask() {
+    const task = getActiveTask();
+    if (!task) return;
+    renderedJsonKey = '';
+    warmJsonResultCache(task);
+    try {
+        await saveTask(task);
+    } catch (error) {
+        console.error(error);
+        alert(error.message || '\u4fdd\u5b58\u7ea0\u6b63\u5931\u8d25');
+    }
+}
+
+function layoutPPOCRTextLayer(stage, page, width, height, toolbar, imageElement = null) {
+    stage.querySelector('.ocr-text-layer')?.remove();
+    const layer = document.createElement('div');
+    layer.className = 'ocr-text-layer';
+    stage.appendChild(layer);
+
+    const lines = page.lines || [];
+    let renderWidth = width || 1;
+    let renderHeight = height || 1;
+    const sourceSize = getSourcePageDisplaySize(page.pageNumber);
+    if (sourceSize) {
+        renderWidth = sourceSize.width;
+        renderHeight = sourceSize.height;
+    }
+    if (imageElement) {
+        renderWidth = renderWidth || imageElement.clientWidth || imageElement.naturalWidth || width || 1;
+        renderHeight = renderHeight || imageElement.clientHeight || imageElement.naturalHeight || height || 1;
+        stage.style.width = `${renderWidth}px`;
+        stage.style.height = `${renderHeight}px`;
+        layer.style.width = `${renderWidth}px`;
+        layer.style.height = `${renderHeight}px`;
+        imageElement.style.width = `${renderWidth}px`;
+        imageElement.style.height = `${renderHeight}px`;
+    }
+
+    const bounds = inferPPOCRCoordinateBounds(lines, width, height);
+    lines.forEach((line) => {
+        hydratePPOCRLineGeometry(line, page, bounds);
+        const element = document.createElement('button');
+        element.type = 'button';
+        element.className = 'ocr-text-line';
+        element.appendChild(createPPOCRLineLabel(line.text));
+        element.title = line.text;
+        element.setAttribute('aria-label', line.text);
+        element.dataset.page = String(line.sourcePage || page.pageNumber || '');
+        element.dataset.pageResultIndex = String(line.pageResultIndex ?? '');
+        element.dataset.lineIndex = String(line.index ?? '');
+        positionPPOCRLine(element, line, bounds, renderWidth, renderHeight);
+        bindPPOCRLineEvents(element, toolbar, line);
+        layer.appendChild(element);
+        addPPOCRSourceHotspot(line, element, toolbar);
+        fitPPOCRLineElement(element, line);
+    });
+}
+
+function getSourcePageDisplaySize(pageNumber) {
+    const pageWrap = els.sourceViewer.querySelector(`.pdf-page-wrap[data-page="${pageNumber}"]`);
+    const canvas = pageWrap?.querySelector('canvas');
+    if (!canvas) return null;
+    return {
+        width: canvas.clientWidth || canvas.width,
+        height: canvas.clientHeight || canvas.height
+    };
+}
+
+function hydratePPOCRLineGeometry(line, page, bounds) {
+    line.sourcePage = Number(page.pageNumber || line.sourcePage || 1);
+    line.pageResultIndex = page.index;
+    line.pageWidth = bounds.width;
+    line.pageHeight = bounds.height;
+}
+
+function createPPOCRLineLabel(text) {
+    const label = document.createElement('span');
+    label.className = 'ocr-text-line-label';
+    label.textContent = text;
+    return label;
+}
+
+function createPPOCRTextOnlyLayer(stage, lines, toolbar) {
+    const fallback = document.createElement('div');
+    fallback.className = 'ocr-text-only';
+    lines.forEach((line) => {
+        const element = document.createElement('button');
+        element.type = 'button';
+        element.className = 'ocr-text-only-line';
+        element.textContent = line.text;
+        bindPPOCRLineEvents(element, toolbar, line);
+        fallback.appendChild(element);
+    });
+    stage.appendChild(fallback);
+}
+
+function inferPPOCRCoordinateBounds(lines, width, height) {
+    const maxX = Math.max(width, ...lines.map((line) => line.box[2]));
+    const maxY = Math.max(height, ...lines.map((line) => line.box[3]));
+    return {
+        width: maxX || width || 1,
+        height: maxY || height || 1
+    };
+}
+
+function positionPPOCRLine(element, line, bounds, renderWidth, renderHeight) {
+    const box = line.box;
+    const [x1, y1, x2, y2] = box;
+    const left = (x1 / bounds.width) * 100;
+    const top = (y1 / bounds.height) * 100;
+    const width = ((x2 - x1) / bounds.width) * 100;
+    const height = ((y2 - y1) / bounds.height) * 100;
+    const boxWidth = Math.max(1, (width / 100) * renderWidth);
+    const boxHeight = Math.max(1, (height / 100) * renderHeight);
+    const isCodeToken = isPPOCRCodeToken(line.text);
+    const fontSize = fittedPPOCRFontSize(line.text, boxWidth, boxHeight);
+
+    element.style.left = `${left}%`;
+    element.style.top = `${top}%`;
+    element.style.width = `${width}%`;
+    element.style.height = `${height}%`;
+    element.style.fontSize = `${fontSize}px`;
+    if (isCodeToken) {
+        element.classList.add('ocr-text-line-code');
+    }
+    if (!isCodeToken && (boxHeight < 6 || boxWidth < 6)) {
+        element.classList.add('ocr-text-line-compact');
+    }
+}
+
+function fittedPPOCRFontSize(text, boxWidth, boxHeight) {
+    const availableHeight = Math.max(1, boxHeight - 2);
+    const byHeight = availableHeight * 0.92;
+    if (isPPOCRCodeToken(text)) {
+        return Math.round(Math.max(4.2, Math.min(12, byHeight)) * 10) / 10;
+    }
+    const minReadable = boxWidth >= 120 ? 9.4 : 6;
+    const byNarrowWidth = boxWidth < 18 ? Math.max(5, boxWidth * 0.72) : 14;
+    return Math.round(Math.max(minReadable, Math.min(14, byHeight, byNarrowWidth)) * 10) / 10;
+}
+
+function isPPOCRCodeToken(text) {
+    const value = String(text || '').trim();
+    return /^[A-Za-z]{2,8}\d{2,8}[A-Za-z0-9-]*$/.test(value);
+}
+
+function fitPPOCRLineElement(element, line) {
+    const label = element.querySelector('.ocr-text-line-label');
+    if (!label) return;
+
+    label.style.transform = 'none';
+    const isCodeToken = isPPOCRCodeToken(line?.text);
+    const isWideTextLine = element.clientWidth >= 120;
+    const minScale = isCodeToken || isWideTextLine ? 0.48 : 0.62;
+    const minHeightScale = isWideTextLine && !isCodeToken ? 0.82 : 1;
+    const minFontSize = isCodeToken ? 3.8 : 4.8;
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+        const availableWidth = Math.max(1, element.clientWidth - 1);
+        const availableHeight = Math.max(1, element.clientHeight - 1);
+        const naturalWidth = Math.max(1, label.scrollWidth || label.getBoundingClientRect().width);
+        const naturalHeight = Math.max(1, label.scrollHeight || label.getBoundingClientRect().height);
+        const widthScale = Math.min(1, availableWidth / naturalWidth);
+        const heightScale = Math.min(1, availableHeight / naturalHeight);
+
+        if (widthScale >= minScale && heightScale >= minHeightScale) {
+            label.style.transform = widthScale < 1 ? `scaleX(${roundPPOCRScale(widthScale)})` : 'none';
+            return;
+        }
+
+        const currentSize = Number.parseFloat(element.style.fontSize || getComputedStyle(element).fontSize) || 6;
+        const targetWidthRatio = widthScale < minScale ? widthScale / minScale : 1;
+        const targetHeightRatio = heightScale < minHeightScale ? heightScale / minHeightScale : 1;
+        const ratio = Math.min(targetHeightRatio, targetWidthRatio, 1);
+        const nextSize = Math.round(Math.max(minFontSize, currentSize * ratio * 0.98) * 10) / 10;
+        if (nextSize >= currentSize - 0.05) break;
+        element.style.fontSize = `${nextSize}px`;
+    }
+
+    const finalAvailableWidth = Math.max(1, element.clientWidth - 1);
+    const finalNaturalWidth = Math.max(1, label.scrollWidth || label.getBoundingClientRect().width);
+    const finalScale = Math.min(1, finalAvailableWidth / finalNaturalWidth);
+    label.style.transform = finalScale < 1 ? `scaleX(${roundPPOCRScale(finalScale)})` : 'none';
+}
+
+function roundPPOCRScale(value) {
+    return Math.round(Math.max(0.35, Math.min(1, value)) * 1000) / 1000;
+}
+
+function bindPPOCRLineEvents(element, toolbar, line) {
+    const activate = () => activatePPOCRLine(element, toolbar, line);
+    element.addEventListener('mouseenter', activate);
+    element.addEventListener('focus', activate);
+    element.addEventListener('click', activate);
+}
+
+function activatePPOCRLine(element, toolbar, line, { scrollSource = false } = {}) {
+    const stage = element.closest('.ocr-page-stage');
+    if (!stage) return;
+    stage.querySelectorAll('.ocr-text-line.active, .ocr-text-only-line.active').forEach((item) => {
+        item.classList.remove('active');
+    });
+    element.classList.add('active');
+    toolbar.dataset.text = line.text;
+    toolbar._activePPOCR = { element, line };
+    toolbar.classList.remove('hidden');
+    showPPOCRSourceHighlight(line);
+    if (scrollSource) {
+        const page = els.sourceViewer.querySelector(`.pdf-page-wrap[data-page="${line.sourcePage}"]`);
+        if (page && !isElementMostlyVisible(page, els.sourceViewer)) {
+            scrollPdfPageIntoView(line.sourcePage, 'smooth');
+        }
+    }
+
+    const stageRect = stage.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const viewerRect = els.markdownView.getBoundingClientRect();
+    const minLeft = viewerRect.left - stageRect.left + 8;
+    const maxLeft = viewerRect.right - stageRect.left - 152;
+    const minTop = viewerRect.top - stageRect.top + 8;
+    const maxTop = viewerRect.bottom - stageRect.top - 44;
+    const left = Math.min(
+        Math.max(elementRect.left - stageRect.left + elementRect.width - 142, minLeft),
+        Math.max(maxLeft, minLeft)
+    );
+    const top = Math.min(
+        Math.max(elementRect.bottom - stageRect.top + 8, minTop),
+        Math.max(maxTop, minTop)
+    );
+    toolbar.style.left = `${left}px`;
+    toolbar.style.top = `${top}px`;
+}
+
+function schedulePPOCRSourceScrollSync() {
+    if (splitScrollSyncLocked || ppocrScrollSyncFrame) return;
+    ppocrScrollSyncFrame = requestAnimationFrame(() => {
+        ppocrScrollSyncFrame = 0;
+        syncSourceScrollFromPPOCRVisual();
+    });
+}
+
+function handlePPOCRMarkdownScroll() {
+    schedulePPOCRSourceScrollSync();
+    queueHorizontalScrollOnly(els.markdownView, els.sourceViewer);
+}
+
+function syncHorizontalScrollOnly(fromContainer, toContainer) {
+    const task = getActiveTask();
+    if (!isPPOCRVisualTask(task) || activeResultView !== 'markdown') return;
+    if (splitScrollSyncLocked || !fromContainer || !toContainer) return;
+    const targetLeft = horizontalScrollTarget(toContainer, horizontalScrollRatio(fromContainer));
+    if (Math.abs((toContainer.scrollLeft || 0) - targetLeft) < 1) return;
+    withSplitScrollLock(() => {
+        toContainer.scrollLeft = targetLeft;
+    });
+}
+
+function queueHorizontalScrollOnly(fromContainer, toContainer) {
+    syncHorizontalScrollOnly(fromContainer, toContainer);
+    window.setTimeout(() => {
+        syncHorizontalScrollOnly(fromContainer, toContainer);
+    }, 120);
+}
+
+function syncSourceScrollFromPPOCRVisual() {
+    const task = getActiveTask();
+    if (!isPPOCRVisualTask(task) || activeResultView !== 'markdown') return;
+    if (!currentPdf || !els.sourceViewer || !els.markdownView) return;
+
+    const visualPage = getActivePPOCRVisualPage();
+    if (!visualPage) return;
+
+    const pageNumber = Number(visualPage.dataset.page || 1);
+    const sourcePage = els.sourceViewer.querySelector(`.pdf-page-wrap[data-page="${pageNumber}"]`);
+    if (!sourcePage) return;
+
+    const stage = visualPage.querySelector('.ocr-page-stage') || visualPage;
+    const markdownRect = els.markdownView.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    const sourceScrollable = Math.max(0, sourcePage.offsetHeight - els.sourceViewer.clientHeight);
+    const visualScrollable = Math.max(1, stageRect.height - els.markdownView.clientHeight);
+    const progress = Math.min(Math.max((markdownRect.top - stageRect.top) / visualScrollable, 0), 1);
+    const pageTop = sourcePageTop(sourcePage);
+    const targetTop = Math.max(0, pageTop + progress * sourceScrollable);
+
+    withSplitScrollLock(() => {
+        els.sourceViewer.scrollTo({
+            top: targetTop,
+            left: horizontalScrollTarget(els.sourceViewer, horizontalScrollRatio(els.markdownView)),
+            behavior: 'auto'
+        });
+    });
+    if (pageNumber !== currentPage) {
+        currentPage = pageNumber;
+        updatePdfControls();
+    }
+}
+
+function syncPPOCRVisualScrollFromSource() {
+    const task = getActiveTask();
+    if (!isPPOCRVisualTask(task) || activeResultView !== 'markdown') return;
+    if (!currentPdf || !els.sourceViewer || !els.markdownView) return;
+
+    const sourcePage = getActiveSourcePage();
+    if (!sourcePage) return;
+
+    const pageNumber = Number(sourcePage.dataset.page || currentPage || 1);
+    const visualPage = els.markdownView.querySelector(`.ocr-visual-page[data-page="${pageNumber}"]`);
+    if (!visualPage) return;
+
+    const stage = visualPage.querySelector('.ocr-page-stage') || visualPage;
+    const sourceScrollable = Math.max(1, sourcePage.offsetHeight - els.sourceViewer.clientHeight);
+    const sourceProgress = Math.min(Math.max((els.sourceViewer.scrollTop - sourcePageTop(sourcePage)) / sourceScrollable, 0), 1);
+    const visualScrollable = Math.max(0, stage.offsetHeight - els.markdownView.clientHeight);
+    const visualTop = pageNumber <= 1
+        ? 0
+        : visualPage.offsetTop - els.markdownView.offsetTop - 12;
+    const targetTop = Math.max(0, visualTop + sourceProgress * visualScrollable);
+
+    withSplitScrollLock(() => {
+        els.markdownView.scrollTo({
+            top: targetTop,
+            left: horizontalScrollTarget(els.markdownView, horizontalScrollRatio(els.sourceViewer)),
+            behavior: 'auto'
+        });
+    });
+}
+
+function getActivePPOCRVisualPage() {
+    const pages = Array.from(els.markdownView.querySelectorAll('.ocr-visual-page'));
+    if (!pages.length) return null;
+
+    const viewerRect = els.markdownView.getBoundingClientRect();
+    let bestPage = pages[0];
+    let bestVisibleArea = -1;
+    let nearestDistance = Infinity;
+
+    pages.forEach((page) => {
+        const rect = page.getBoundingClientRect();
+        const visibleHeight = Math.max(0, Math.min(rect.bottom, viewerRect.bottom) - Math.max(rect.top, viewerRect.top));
+        const distance = Math.abs(rect.top - viewerRect.top);
+        if (visibleHeight > bestVisibleArea || (visibleHeight === bestVisibleArea && distance < nearestDistance)) {
+            bestPage = page;
+            bestVisibleArea = visibleHeight;
+            nearestDistance = distance;
+        }
+    });
+
+    return bestPage;
+}
+
 function ensureJsonVirtualDom() {
     let spacer = els.jsonView.querySelector('.json-virtual-spacer');
     let lines = els.jsonView.querySelector('.json-virtual-lines');
@@ -905,6 +1826,9 @@ async function processTask(task, { confirmCompleted = true } = {}) {
             });
             rebuildTaskResultFromCompletedBatches(task);
         } else {
+            if (confirmCompleted || !task.modelId) {
+                applySelectedModelToTask(task);
+            }
             task.markdown = '';
             task.images = {};
             task.ocrResults = [];
@@ -929,7 +1853,7 @@ async function processTask(task, { confirmCompleted = true } = {}) {
             let result;
             try {
                 await ensureBatchPayload(task, batch);
-                result = await callVLLM(batch);
+                result = await callOCR(batch, task);
             } finally {
                 releaseBatchPayload(batch);
             }
@@ -938,7 +1862,9 @@ async function processTask(task, { confirmCompleted = true } = {}) {
             batch.markdown = prepared.markdown;
             appendTaskMarkdown(task, prepared.markdown);
             Object.assign(task.images, prepared.images);
-            task.ocrResults.push(...normalizeOCRJsonResults(result).map((pageResult) => compactOCRJsonResult(pageResult, batch.id)));
+            task.ocrResults.push(...normalizeOCRJsonResults(result).map((pageResult, pageIndex) => (
+                compactOCRJsonResult(pageResult, batch, pageIndex)
+            )));
             task.updatedAt = Date.now();
             await saveTask(task);
             refreshTaskUi(task);
@@ -1040,12 +1966,14 @@ function refreshTaskUi(task) {
     renderTaskList();
     const activeTask = getActiveTask();
     if (task?.id === activeTaskId) {
+        updateActiveModelDisplay(task);
         renderResultPane(task);
     }
     updateActionState(activeTask);
 }
 
-async function callVLLM(batch) {
+async function callOCR(batch, task) {
+    const model = getTaskModel(task);
     const ignoreLabels = [];
     if (els.ignoreNumberSwitch.checked) ignoreLabels.push('number');
     ignoreLabels.push('footnote');
@@ -1069,8 +1997,9 @@ async function callVLLM(batch) {
     formData.append('formatBlockContent', 'true');
     formData.append('showFormulaNumber', String(els.formulaNumberSwitch.checked));
     formData.append('markdownIgnoreLabels', JSON.stringify(ignoreLabels));
+    formData.append('modelId', model.id);
 
-    const response = await fetch(`${API_BASE}/paddleocr-vl-1.6`, {
+    const response = await fetch(modelApiUrl(model), {
         method: 'POST',
         body: formData
     });
@@ -1214,31 +2143,60 @@ function resetWorkbench() {
     els.browseBtn = document.getElementById('browse-btn');
     els.browseBtn.addEventListener('click', () => els.fileInput.click());
     renderResultPane(null);
+    updateActiveModelDisplay(null);
     updateActionState(null);
 }
 
 function changePdfPage(delta) {
     if (!currentPdf) return;
     currentPage = Math.min(Math.max(currentPage + delta, 1), currentPdf.numPages);
+    resetSplitHorizontalScroll();
     scrollPdfPageIntoView(currentPage, 'smooth');
+    syncPPOCRVisualScrollFromSource();
     updatePdfControls();
 }
 
 async function changeZoom(delta) {
     if (!currentPdf) return;
+    const scrollAnchor = captureSourceScrollAnchor();
     currentZoom = Math.min(2.2, Math.max(0.55, currentZoom + delta));
-    await renderPdfDocument(++sourceRenderToken);
+    await renderPdfDocument(++sourceRenderToken, scrollAnchor);
     const task = getActiveTask();
     if (task && activeResultView === 'markdown') {
+        if (isPPOCRVisualTask(task)) {
+            invalidatePPOCRVisualRender();
+        }
         renderResultPane(task);
+        queueSyncedScrollRestore(scrollAnchor);
+    }
+}
+
+async function resetZoom() {
+    if (!currentPdf) return;
+    const scrollAnchor = resetAnchorHorizontal(captureSourceScrollAnchor());
+    currentZoom = getDefaultPdfZoom();
+    await renderPdfDocument(++sourceRenderToken, scrollAnchor);
+    const task = getActiveTask();
+    if (task && activeResultView === 'markdown') {
+        if (isPPOCRVisualTask(task)) {
+            invalidatePPOCRVisualRender();
+        }
+        renderResultPane(task);
+        queueSyncedScrollRestore(scrollAnchor);
     }
 }
 
 function scrollPdfPageIntoView(pageNumber, behavior = 'smooth') {
     const page = els.sourceViewer.querySelector(`.pdf-page-wrap[data-page="${pageNumber}"]`);
     if (!page) return;
-    const top = page.offsetTop - els.sourceViewer.offsetTop - 12;
+    const top = Number(pageNumber) <= 1 ? 0 : page.offsetTop - els.sourceViewer.offsetTop - 12;
     els.sourceViewer.scrollTo({ top: Math.max(top, 0), behavior });
+}
+
+function handleSourceViewerScroll() {
+    updateCurrentPageFromScroll();
+    scheduleSourceToPPOCRScrollSync();
+    queueHorizontalScrollOnly(els.sourceViewer, els.markdownView);
 }
 
 function updateCurrentPageFromScroll() {
@@ -1269,6 +2227,136 @@ function updatePdfControls() {
     els.pageIndicator.textContent = `${currentPage} / ${currentPdf.numPages}`;
     els.prevPageBtn.disabled = currentPage <= 1;
     els.nextPageBtn.disabled = currentPage >= currentPdf.numPages;
+    if (els.resetZoomBtn) {
+        els.resetZoomBtn.disabled = Math.abs(currentZoom - getDefaultPdfZoom()) < 0.01;
+    }
+}
+
+function getDefaultPdfZoom() {
+    const viewer = els.sourceViewer;
+    if (!viewer) return DEFAULT_PDF_ZOOM;
+    const styles = getComputedStyle(viewer);
+    const horizontalPadding = (Number.parseFloat(styles.paddingLeft) || 0)
+        + (Number.parseFloat(styles.paddingRight) || 0);
+    const availableWidth = Math.max(0, viewer.clientWidth - horizontalPadding - PDF_FIT_WIDTH_GUTTER);
+    if (!availableWidth || !pdfDefaultPageWidth) return DEFAULT_PDF_ZOOM;
+    const fitZoom = availableWidth / pdfDefaultPageWidth;
+    return roundPdfZoom(Math.max(DEFAULT_PDF_ZOOM, Math.min(MAX_DEFAULT_PDF_ZOOM, fitZoom)));
+}
+
+function roundPdfZoom(value) {
+    return Math.round(value * 100) / 100;
+}
+
+function captureSourceScrollAnchor() {
+    const page = getActiveSourcePage();
+    if (!page) {
+        return {
+            pageNumber: currentPage,
+            progress: 0,
+            xRatio: horizontalScrollRatio(els.sourceViewer)
+        };
+    }
+
+    const pageNumber = Number(page.dataset.page || currentPage);
+    const pageTop = sourcePageTop(page);
+    const scrollable = Math.max(1, page.offsetHeight - els.sourceViewer.clientHeight);
+    return {
+        pageNumber,
+        progress: Math.min(Math.max((els.sourceViewer.scrollTop - pageTop) / scrollable, 0), 1),
+        xRatio: horizontalScrollRatio(els.sourceViewer)
+    };
+}
+
+function restoreSourceScrollAnchor(anchor, behavior = 'auto') {
+    if (!anchor) return;
+    const page = els.sourceViewer.querySelector(`.pdf-page-wrap[data-page="${anchor.pageNumber}"]`);
+    if (!page) return;
+    const scrollable = Math.max(0, page.offsetHeight - els.sourceViewer.clientHeight);
+    const targetTop = sourcePageTop(page) + (anchor.progress || 0) * scrollable;
+    els.sourceViewer.scrollTo({
+        top: Math.max(targetTop, 0),
+        left: horizontalScrollTarget(els.sourceViewer, anchor.xRatio || 0),
+        behavior
+    });
+    currentPage = Number(anchor.pageNumber || currentPage);
+    updatePdfControls();
+}
+
+function queueSyncedScrollRestore(anchor) {
+    window.setTimeout(() => {
+        restoreSourceScrollAnchor(anchor, 'auto');
+        syncPPOCRVisualScrollFromSource();
+    }, 120);
+    window.setTimeout(() => {
+        restoreSourceScrollAnchor(anchor, 'auto');
+        syncPPOCRVisualScrollFromSource();
+    }, 360);
+}
+
+function getActiveSourcePage() {
+    const pages = Array.from(els.sourceViewer.querySelectorAll('.pdf-page-wrap'));
+    if (!pages.length) return null;
+
+    const viewerTop = els.sourceViewer.getBoundingClientRect().top;
+    let nearestPage = pages[0];
+    let nearestDistance = Infinity;
+    pages.forEach((page) => {
+        const distance = Math.abs(page.getBoundingClientRect().top - viewerTop - 16);
+        if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearestPage = page;
+        }
+    });
+    return nearestPage;
+}
+
+function sourcePageTop(page) {
+    if (!page) return 0;
+    const pageNumber = Number(page.dataset.page || 1);
+    return pageNumber <= 1 ? 0 : page.offsetTop - els.sourceViewer.offsetTop - 12;
+}
+
+function horizontalScrollRatio(container) {
+    const maxScroll = Math.max(0, container.scrollWidth - container.clientWidth);
+    return maxScroll ? Math.min(Math.max(container.scrollLeft / maxScroll, 0), 1) : 0;
+}
+
+function horizontalScrollTarget(container, ratio) {
+    const maxScroll = Math.max(0, container.scrollWidth - container.clientWidth);
+    return maxScroll * Math.min(Math.max(ratio, 0), 1);
+}
+
+function resetAnchorHorizontal(anchor) {
+    if (!anchor) return anchor;
+    return {
+        ...anchor,
+        xRatio: 0
+    };
+}
+
+function resetSplitHorizontalScroll() {
+    if (!els.sourceViewer || !els.markdownView) return;
+    withSplitScrollLock(() => {
+        els.sourceViewer.scrollLeft = 0;
+        els.markdownView.scrollLeft = 0;
+    });
+}
+
+function withSplitScrollLock(callback) {
+    splitScrollSyncLocked = true;
+    callback();
+    window.setTimeout(() => {
+        splitScrollSyncLocked = false;
+    }, 90);
+}
+
+function scheduleSourceToPPOCRScrollSync() {
+    if (splitScrollSyncLocked || sourceScrollSyncFrame) return;
+    sourceScrollSyncFrame = requestAnimationFrame(() => {
+        sourceScrollSyncFrame = 0;
+        syncPPOCRVisualScrollFromSource();
+    });
 }
 
 async function renderPDFPageDataUrl(pdf, pageNumber, scale) {
@@ -1815,8 +2903,61 @@ function showSourceHighlight(block) {
 
 }
 
+function showPPOCRSourceHighlight(line) {
+    if (!line?.box || !line.pageWidth || !line.pageHeight) return;
+    clearSourceHighlight();
+    const pageWrap = els.sourceViewer.querySelector(`.pdf-page-wrap[data-page="${line.sourcePage}"]`);
+    const canvas = pageWrap?.querySelector('canvas');
+    const layer = pageWrap?.querySelector('.pdf-highlight-layer');
+    if (!pageWrap || !canvas || !layer) return;
+
+    const box = document.createElement('div');
+    box.className = 'source-highlight-box source-highlight-box-ocr';
+    positionSourceOverlayBox(box, {
+        bbox: line.box,
+        pageWidth: line.pageWidth,
+        pageHeight: line.pageHeight
+    }, canvas);
+    layer.appendChild(box);
+}
+
 function clearSourceHighlight() {
     els.sourceViewer.querySelectorAll('.source-highlight-box').forEach((box) => box.remove());
+}
+
+function addPPOCRSourceHotspot(line, markdownElement, toolbar) {
+    if (!line?.box || !line.pageWidth || !line.pageHeight) return;
+    const pageWrap = els.sourceViewer.querySelector(`.pdf-page-wrap[data-page="${line.sourcePage}"]`);
+    const canvas = pageWrap?.querySelector('canvas');
+    const layer = pageWrap?.querySelector('.pdf-highlight-layer');
+    if (!pageWrap || !canvas || !layer) return;
+
+    const hotspot = document.createElement('button');
+    hotspot.type = 'button';
+    hotspot.className = 'source-link-hotspot source-ocr-hotspot';
+    hotspot.setAttribute('aria-label', line.text || 'OCR');
+    hotspot.dataset.page = String(line.sourcePage || '');
+    hotspot.dataset.pageResultIndex = String(line.pageResultIndex ?? '');
+    hotspot.dataset.lineIndex = String(line.index ?? '');
+    positionSourceOverlayBox(hotspot, {
+        bbox: line.box,
+        pageWidth: line.pageWidth,
+        pageHeight: line.pageHeight
+    }, canvas);
+
+    const preview = () => {
+        activatePPOCRLine(markdownElement, toolbar, line, { scrollSource: false });
+    };
+    const locate = () => {
+        scrollElementIntoContainer(markdownElement, els.markdownView, 'smooth');
+        activatePPOCRLine(markdownElement, toolbar, line, { scrollSource: false });
+    };
+    hotspot.addEventListener('mouseenter', preview);
+    hotspot.addEventListener('mouseover', preview);
+    hotspot.addEventListener('pointerenter', preview);
+    hotspot.addEventListener('focusin', preview);
+    hotspot.addEventListener('click', locate);
+    layer.appendChild(hotspot);
 }
 
 function addSourceHotspot(block, markdownElement) {
@@ -1938,8 +3079,14 @@ function safeImagePath(batchId, path) {
     return `ocr_images/${batchId}_${filename}`;
 }
 
-function compactOCRJsonResult(pageResult, batchId) {
+function compactOCRJsonResult(pageResult, batchOrId, pageIndex = 0) {
+    const batch = typeof batchOrId === 'object' ? batchOrId : null;
+    const batchId = batch?.id || batchOrId;
     const compact = stripLargeOCRFields(pageResult);
+    if (batch && compact?.parser === 'pp-ocrv6') {
+        compact.sourcePage = Number(batch.startPage || 1) + pageIndex;
+        compact.batchId = batch.id;
+    }
     rewriteMarkdownImageMaps(compact, batchId);
     return compact;
 }

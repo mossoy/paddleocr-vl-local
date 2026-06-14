@@ -18,6 +18,7 @@ if not exist "env.txt" (
         echo VLM_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-sm120-offline
         echo PANDOCR_GPU_DEVICE_ID=0
         echo PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
+        echo PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
         echo PADDLE_REQUEST_TIMEOUT=3600
     ) > env.txt
 )
@@ -25,8 +26,8 @@ if not exist "env.txt" (
 echo Pulling PaddleOCR-VL images...
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
 
-echo Building pandocr-web...
-docker compose --env-file env.txt build pandocr-web
+echo Building local images...
+docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 
 echo Build complete.
 echo.

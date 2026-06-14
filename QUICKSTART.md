@@ -1,4 +1,4 @@
-# 快速开始
+﻿# 快速开始
 
 完整部署说明统一维护在 `README.zh-CN.md` 的“部署方式”章节；那里分为 NVIDIA Docker 版本和 macOS Apple Silicon 版本。
 
@@ -84,10 +84,10 @@ nvidia-smi
 
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
-docker compose --env-file env.txt build pandocr-web
+docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 ```
 
-`pandocr-web` 只构建 Web 服务，不包含 Paddle/PaddleX；PaddleOCR-VL 由官方 `paddleocr-vl-api` 和 `paddleocr-vlm-server` 镜像提供。
+`pandocr-web` 只构建 Web 服务，不包含 Paddle/PaddleX；PaddleOCR-VL 由官方 `paddleocr-vl-api` 和 `paddleocr-vlm-server` 镜像提供，PP-OCRv6 由本地派生镜像 `paddleocr-ocr-api` 提供。
 
 ### 3. 启动服务
 
@@ -103,15 +103,17 @@ docker compose --env-file env.txt up -d
 docker compose --env-file env.txt ps
 curl http://localhost:8000/api/models
 curl http://localhost:8081/health
+curl http://localhost:8082/health
 ```
 
-期望看到 3 个容器：
+期望看到 4 个容器：
 
 - `paddleocr-vlm-server`
 - `paddleocr-vl-api`
+- `paddleocr-ocr-api`
 - `pandocr-web`
 
-`/api/models` 应返回 `PaddleOCR-VL-1.6-0.9B`。
+`/api/models` 应返回 `paddleocr-vl-1.6` 和 `pp-ocrv6`。
 
 ### 5. 使用
 
@@ -138,7 +140,7 @@ unexpected status ... docker.m.daocloud.io ... 403 Forbidden
 
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
-docker compose --env-file env.txt build pandocr-web
+docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 docker compose --env-file env.txt up -d
 ```
 
@@ -156,7 +158,7 @@ docker compose --env-file env.txt logs --tail=200 paddleocr-vlm-server
 
 ```powershell
 docker compose --env-file env.docker pull paddleocr-vlm-server paddleocr-vl-api
-docker compose --env-file env.docker build pandocr-web
+docker compose --env-file env.docker build paddleocr-ocr-api pandocr-web
 docker compose --env-file env.docker up -d
 ```
 

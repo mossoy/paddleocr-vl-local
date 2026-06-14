@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PandOCR - 文档解析工作台</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232f6df6'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-family='Arial,sans-serif' font-size='34' font-weight='700' fill='white'%3EP%3C/text%3E%3C/svg%3E">
-    <link rel="stylesheet" href="/static/style.css?v=21">
+    <link rel="stylesheet" href="/static/style.css?v=34">
     <script src="/static/vendor/pdfjs/pdf.min.js"></script>
     <script src="/static/vendor/pdf-lib/pdf-lib.min.js"></script>
     <script src="/static/vendor/marked/marked.min.js"></script>
@@ -31,6 +31,10 @@
                 </div>
             </div>
             <div class="topbar-actions">
+                <label class="model-select-wrap" title="Model">
+                    <span>Model</span>
+                    <select id="model-select" aria-label="Model"></select>
+                </label>
                 <div class="model-pill">
                     <span id="model-status-dot" class="dot connecting"></span>
                     <span id="model-status-text">连接模型中...</span>
@@ -118,31 +122,36 @@
                         <button class="icon-button" id="zoom-in-btn" title="放大">
                             <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
                         </button>
+                        <button class="icon-button" id="reset-zoom-btn" title="100%">
+                            <svg viewBox="0 0 24 24"><path d="M4 4v6h6"/><path d="M20 20v-6h-6"/><path d="M5 19A8 8 0 0 0 19 5"/></svg>
+                        </button>
                     </div>
                 </section>
 
                 <section class="result-pane">
                     <div class="pane-header result-header">
-                        <div>
-                            <div class="pane-kicker">解析模型 <span class="model-name" id="active-model-name">PaddleOCR-VL-1.6</span></div>
-                            <h2 id="result-title">解析结果</h2>
+                        <div class="result-header-main">
+                            <div class="result-heading">
+                                <div class="pane-kicker">解析模型 <span class="model-name" id="active-model-name">PaddleOCR-VL-1.6</span></div>
+                                <h2 id="result-title">解析结果</h2>
+                            </div>
+                            <div class="result-actions">
+                                <button class="secondary-button" id="start-btn">
+                                    <svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></svg>
+                                    开始解析
+                                </button>
+                                <button class="icon-button" id="copy-btn" title="复制 Markdown">
+                                    <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                </button>
+                                <button class="icon-button" id="download-btn" title="下载结果">
+                                    <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>
+                                </button>
+                            </div>
                         </div>
-                        <div class="result-actions">
-                            <button class="secondary-button" id="start-btn">
-                                <svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></svg>
-                                开始解析
-                            </button>
-                            <button class="icon-button" id="copy-btn" title="复制 Markdown">
-                                <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                            </button>
-                            <button class="icon-button" id="download-btn" title="下载结果">
-                                <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>
-                            </button>
+                        <div class="view-tabs">
+                            <button class="view-tab active" data-view="markdown">文档解析</button>
+                            <button class="view-tab" data-view="json">JSON</button>
                         </div>
-                    </div>
-                    <div class="view-tabs">
-                        <button class="view-tab active" data-view="markdown">文档解析</button>
-                        <button class="view-tab" data-view="json">JSON</button>
                     </div>
                     <div class="result-viewer">
                         <div class="markdown-preview" id="markdown-view">
@@ -171,6 +180,6 @@
         </div>
     </template>
 
-    <script charset="UTF-8" src="/static/app.js?v=55"></script>
+    <script charset="UTF-8" src="/static/app.js?v=81"></script>
 </body>
 </html>

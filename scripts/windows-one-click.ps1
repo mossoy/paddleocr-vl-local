@@ -221,7 +221,7 @@ function Show-Diagnostics {
     $statusArgs = Get-ComposeArgs @("ps", "-a")
     & docker @statusArgs
 
-    foreach ($service in @("paddleocr-vlm-server", "paddleocr-vl-api", "pandocr-web")) {
+    foreach ($service in @("paddleocr-vlm-server", "paddleocr-vl-api", "paddleocr-ocr-api", "pandocr-web")) {
         Write-Section "Recent logs: $service"
         $logArgs = Get-ComposeArgs @("logs", "--tail=160", $service)
         & docker @logArgs
@@ -238,23 +238,25 @@ function Wait-ForServices {
     while ((Get-Date) -lt $deadline) {
         $vlm = Get-ContainerStatus "paddleocr-vlm-server"
         $api = Get-ContainerStatus "paddleocr-vl-api"
+        $ocr = Get-ContainerStatus "paddleocr-ocr-api"
         $web = Get-ContainerStatus "pandocr-web"
         $apiOk = Test-HttpOk "http://localhost:8081/health"
+        $ocrOk = Test-HttpOk "http://localhost:8082/health"
         $webOk = Test-HttpOk "http://localhost:8000/"
 
-        if ($apiOk -and $webOk) {
+        if ($apiOk -and $ocrOk -and $webOk) {
             Write-Ok "All services are healthy."
             return
         }
 
-        foreach ($status in @($vlm, $api, $web)) {
+        foreach ($status in @($vlm, $api, $ocr, $web)) {
             if ($status -match "^exited\|") {
                 Show-Diagnostics
                 throw "A service exited before becoming healthy."
             }
         }
 
-        $line = "vlm=$vlm api=$api web=$web apiHttp=$apiOk webHttp=$webOk"
+        $line = "vlm=$vlm api=$api ocr=$ocr web=$web apiHttp=$apiOk ocrHttp=$ocrOk webHttp=$webOk"
         if ($line -ne $lastLine) {
             Write-Host $line
             $lastLine = $line
@@ -312,7 +314,7 @@ try {
     }
 
     if (-not $SkipBuild) {
-        Invoke-Checked -File "docker" -Arguments (Get-ComposeArgs @("build", "pandocr-web")) -Description "Building pandocr-web locally"
+        Invoke-Checked -File "docker" -Arguments (Get-ComposeArgs @("build", "paddleocr-ocr-api", "pandocr-web")) -Description "Building local images"
     }
     else {
         Write-Warn "Skipping pandocr-web build."
@@ -332,7 +334,8 @@ try {
 
     Write-Section "Deployment complete"
     Write-Host "WebUI: http://localhost:8000"
-    Write-Host "API health: http://localhost:8081/health"
+    Write-Host "VL API health: http://localhost:8081/health"
+    Write-Host "OCR API health: http://localhost:8082/health"
     Write-Host "Useful logs: docker compose --env-file `"$script:RuntimeEnv`" logs -f"
 
     if (-not $NoOpen) {

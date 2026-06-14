@@ -31,6 +31,8 @@ def parse_csv_env(name: str, default: str) -> list[str]:
 
 PADDLE_SERVICE_URL = os.getenv("PADDLE_SERVICE_URL", "http://localhost:8081/layout-parsing")
 PADDLEOCR_VL_MODEL_NAME = os.getenv("PADDLEOCR_VL_MODEL_NAME", "PaddleOCR-VL-1.6-0.9B")
+PADDLE_OCR_SERVICE_URL = os.getenv("PADDLE_OCR_SERVICE_URL", "http://localhost:8082/ocr")
+PPOCR_V6_MODEL_NAME = os.getenv("PPOCR_V6_MODEL_NAME", "PP-OCRv6_medium")
 PADDLE_REQUEST_TIMEOUT = float(os.getenv("PADDLE_REQUEST_TIMEOUT", "3600"))
 TASK_DATA_DIR = Path(os.getenv("PANDOCR_TASK_DATA_DIR", "data/tasks")).resolve()
 MAX_REQUEST_BYTES = int(float(os.getenv("PANDOCR_MAX_UPLOAD_MB", "512")) * 1024 * 1024)
@@ -76,8 +78,26 @@ async def read_root():
 
 @app.get("/api/models")
 async def get_models():
-    """Return the active OCR model for frontend display."""
-    return {"data": [{"id": PADDLEOCR_VL_MODEL_NAME}]}
+    """Return OCR models available through this proxy."""
+    return {
+        "default": "paddleocr-vl-1.6",
+        "data": [
+            {
+                "id": "paddleocr-vl-1.6",
+                "name": PADDLEOCR_VL_MODEL_NAME,
+                "label": "PaddleOCR-VL 1.6",
+                "kind": "document_parsing",
+                "endpoint": "/api/paddleocr-vl-1.6",
+            },
+            {
+                "id": "pp-ocrv6",
+                "name": PPOCR_V6_MODEL_NAME,
+                "label": "PP-OCRv6",
+                "kind": "text_ocr",
+                "endpoint": "/api/pp-ocrv6",
+            },
+        ],
+    }
 
 
 def safe_task_id(task_id: str) -> str:
@@ -146,6 +166,8 @@ def task_summary(task: dict) -> dict:
         "pageCount": task.get("pageCount"),
         "pdfBatchSize": task.get("pdfBatchSize"),
         "sourceUrl": task.get("sourceUrl"),
+        "modelId": task.get("modelId"),
+        "modelName": task.get("modelName"),
         "error": task.get("error"),
         "completedPages": completed_pages,
         "batchCount": len(batches),
@@ -399,6 +421,7 @@ class OCRRequest(BaseModel):
     useLayoutDetection: bool = True
     useDocUnwarping: bool = False
     useDocOrientationClassify: bool = False
+    useTextlineOrientation: bool = False
     useChartRecognition: bool = False
     useSealRecognition: bool = True
     formatBlockContent: bool = True
@@ -476,6 +499,7 @@ async def parse_ocr_input(request: Request) -> tuple[OCRRequest, RawOCRInput]:
             useLayoutDetection=parse_bool(form.get("useLayoutDetection"), True),
             useDocUnwarping=parse_bool(form.get("useDocUnwarping"), False),
             useDocOrientationClassify=parse_bool(form.get("useDocOrientationClassify"), False),
+            useTextlineOrientation=parse_bool(form.get("useTextlineOrientation"), False),
             useChartRecognition=parse_bool(form.get("useChartRecognition"), False),
             useSealRecognition=parse_bool(form.get("useSealRecognition"), True),
             formatBlockContent=parse_bool(form.get("formatBlockContent"), True),
@@ -519,66 +543,7 @@ def raw_input_to_bytes(raw_input: RawOCRInput) -> bytes:
         raise HTTPException(status_code=400, detail="Invalid base64 input") from err
 
 
-def build_pipeline_payload(request: OCRRequest, base64_data: str, file_type: int) -> dict:
-    payload = {
-        "file": base64_data,
-        "fileType": file_type,
-        "useLayoutDetection": request.useLayoutDetection,
-        "useDocUnwarping": request.useDocUnwarping,
-        "useDocOrientationClassify": request.useDocOrientationClassify,
-        "useChartRecognition": request.useChartRecognition,
-        "useSealRecognition": request.useSealRecognition,
-        "formatBlockContent": request.formatBlockContent,
-        "showFormulaNumber": request.showFormulaNumber,
-        "prettifyMarkdown": True,
-    }
-    optional_params = [
-        "markdownIgnoreLabels",
-        "layoutThreshold",
-        "layoutNms",
-        "layoutUnclipRatio",
-        "layoutMergeBboxesMode",
-        "repetitionPenalty",
-        "temperature",
-        "topP",
-        "minPixels",
-        "maxPixels",
-        "visualize",
-    ]
-    for param in optional_params:
-        val = getattr(request, param)
-        if val is not None:
-            payload[param] = val
-    return payload
-
-
-def parse_pipeline_response(data: dict, image_prefix: str = "") -> dict:
-    if "result" not in data or "layoutParsingResults" not in data["result"]:
-        logger.warning("Unexpected pipeline response format: %s", data)
-        raise HTTPException(status_code=500, detail="Unexpected response format from Pipeline")
-
-    results = data["result"]["layoutParsingResults"]
-    full_markdown = ""
-    all_images = {}
-
-    for res in results:
-        if "markdown" in res and "text" in res["markdown"]:
-            md_text = res["markdown"]["text"]
-            md_images = res["markdown"].get("images", {})
-            if md_images:
-                for img_path, img_base64 in md_images.items():
-                    key = f"{image_prefix}_{img_path}" if image_prefix else img_path
-                    all_images[key] = img_base64
-            full_markdown += md_text + "\n\n"
-
-    return {
-        "markdown": full_markdown,
-        "images": all_images,
-        "layoutParsingResults": results,
-    }
-
-
-async def run_ocr_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> dict:
+def prepare_service_input(ocr_request: OCRRequest, raw_input: RawOCRInput) -> tuple[str, int]:
     base64_data = normalize_raw_input_to_base64(raw_input)
     file_type = ocr_request.fileType
 
@@ -612,6 +577,165 @@ async def run_ocr_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> di
         except Exception as gif_err:
             logger.info("GIF conversion skipped: %s", gif_err)
 
+    return base64_data, file_type
+
+
+def build_pipeline_payload(request: OCRRequest, base64_data: str, file_type: int) -> dict:
+    payload = {
+        "file": base64_data,
+        "fileType": file_type,
+        "useLayoutDetection": request.useLayoutDetection,
+        "useDocUnwarping": request.useDocUnwarping,
+        "useDocOrientationClassify": request.useDocOrientationClassify,
+        "useChartRecognition": request.useChartRecognition,
+        "useSealRecognition": request.useSealRecognition,
+        "formatBlockContent": request.formatBlockContent,
+        "showFormulaNumber": request.showFormulaNumber,
+        "prettifyMarkdown": True,
+    }
+    optional_params = [
+        "markdownIgnoreLabels",
+        "layoutThreshold",
+        "layoutNms",
+        "layoutUnclipRatio",
+        "layoutMergeBboxesMode",
+        "repetitionPenalty",
+        "temperature",
+        "topP",
+        "minPixels",
+        "maxPixels",
+        "visualize",
+    ]
+    for param in optional_params:
+        val = getattr(request, param)
+        if val is not None:
+            payload[param] = val
+    return payload
+
+
+def build_ppocr_payload(request: OCRRequest, base64_data: str, file_type: int) -> dict:
+    payload = {
+        "file": base64_data,
+        "fileType": file_type,
+        "useDocOrientationClassify": request.useDocOrientationClassify,
+        "useDocUnwarping": request.useDocUnwarping,
+        "useTextlineOrientation": request.useTextlineOrientation,
+    }
+    if request.visualize is not None:
+        payload["visualize"] = request.visualize
+    return payload
+
+
+def parse_pipeline_response(data: dict, image_prefix: str = "") -> dict:
+    if "result" not in data or "layoutParsingResults" not in data["result"]:
+        logger.warning("Unexpected pipeline response format: %s", data)
+        raise HTTPException(status_code=500, detail="Unexpected response format from Pipeline")
+
+    results = data["result"]["layoutParsingResults"]
+    full_markdown = ""
+    all_images = {}
+
+    for res in results:
+        if "markdown" in res and "text" in res["markdown"]:
+            md_text = res["markdown"]["text"]
+            md_images = res["markdown"].get("images", {})
+            if md_images:
+                for img_path, img_base64 in md_images.items():
+                    key = f"{image_prefix}_{img_path}" if image_prefix else img_path
+                    all_images[key] = img_base64
+            full_markdown += md_text + "\n\n"
+
+    return {
+        "markdown": full_markdown,
+        "images": all_images,
+        "layoutParsingResults": results,
+    }
+
+
+def as_jsonable(value):
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {key: as_jsonable(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [as_jsonable(item) for item in value]
+    return value
+
+
+def pick_indexed_value(values, index):
+    if isinstance(values, list) and index < len(values):
+        return as_jsonable(values[index])
+    return None
+
+
+def extract_ppocr_lines(pruned_result: dict) -> list[dict]:
+    texts = pruned_result.get("rec_texts") if isinstance(pruned_result.get("rec_texts"), list) else []
+    scores = pruned_result.get("rec_scores") if isinstance(pruned_result.get("rec_scores"), list) else []
+    boxes = pruned_result.get("rec_boxes")
+    polys = pruned_result.get("rec_polys")
+    if hasattr(boxes, "tolist"):
+        boxes = boxes.tolist()
+    if hasattr(polys, "tolist"):
+        polys = polys.tolist()
+
+    lines = []
+    for index, text in enumerate(texts):
+        line = {
+            "text": str(text),
+            "score": pick_indexed_value(scores, index),
+        }
+        box = pick_indexed_value(boxes, index)
+        poly = pick_indexed_value(polys, index)
+        if box is not None:
+            line["box"] = box
+        if poly is not None:
+            line["poly"] = poly
+        lines.append(line)
+    return lines
+
+
+def parse_ppocr_response(data: dict) -> dict:
+    if "result" not in data or "ocrResults" not in data["result"]:
+        logger.warning("Unexpected PP-OCR response format: %s", data)
+        raise HTTPException(status_code=500, detail="Unexpected response format from PP-OCR service")
+
+    pages = []
+    full_markdown_parts = []
+    for page_index, page_result in enumerate(data["result"]["ocrResults"]):
+        pruned = page_result.get("prunedResult") if isinstance(page_result, dict) else {}
+        if not isinstance(pruned, dict):
+            pruned = {}
+        pruned = as_jsonable(pruned)
+        lines = extract_ppocr_lines(pruned)
+        markdown_text = "\n".join(line["text"] for line in lines if line.get("text"))
+        if markdown_text:
+            full_markdown_parts.append(markdown_text)
+
+        pages.append(
+            {
+                "model": PPOCR_V6_MODEL_NAME,
+                "parser": "pp-ocrv6",
+                "page_index": pruned.get("page_index", page_index),
+                "pageImage": page_result.get("inputImage") if isinstance(page_result, dict) else None,
+                "markdown": {
+                    "text": markdown_text,
+                    "images": {},
+                },
+                "ocrLines": lines,
+                "prunedResult": pruned,
+            }
+        )
+
+    return {
+        "markdown": "\n\n".join(full_markdown_parts),
+        "images": {},
+        "layoutParsingResults": pages,
+    }
+
+
+async def run_ocr_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> dict:
+    base64_data, file_type = prepare_service_input(ocr_request, raw_input)
+
     payload = build_pipeline_payload(ocr_request, base64_data, file_type)
 
     logger.info("Sending request to Pipeline Service at %s", PADDLE_SERVICE_URL)
@@ -632,21 +756,63 @@ async def run_ocr_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> di
         return parse_pipeline_response(resp.json())
 
 
+async def run_ppocrv6_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> dict:
+    base64_data, file_type = prepare_service_input(ocr_request, raw_input)
+    payload = build_ppocr_payload(ocr_request, base64_data, file_type)
+
+    logger.info("Sending request to PP-OCR service at %s", PADDLE_OCR_SERVICE_URL)
+    timeout = PADDLE_REQUEST_TIMEOUT if PADDLE_REQUEST_TIMEOUT > 0 else None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            PADDLE_OCR_SERVICE_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+
+        if resp.status_code != 200:
+            logger.warning("PP-OCR Service Error (HTTP %s): %s", resp.status_code, resp.text)
+            if resp.status_code == 422:
+                logger.warning("PP-OCR Validation Error Details: %s", resp.json())
+            raise HTTPException(status_code=resp.status_code, detail=f"Upstream PP-OCR error: {resp.text}")
+
+        return parse_ppocr_response(resp.json())
+
+
+def validate_proxy_input_size(raw_input: RawOCRInput) -> int:
+    base64_data = normalize_raw_input_to_base64(raw_input)
+    if MAX_REQUEST_BYTES > 0 and len(base64_data) > int(MAX_REQUEST_BYTES * 4 / 3) + 1024:
+        max_mb = MAX_REQUEST_BYTES / 1024 / 1024
+        raise HTTPException(status_code=413, detail=f"OCR input is too large. Max upload size is {max_mb:.0f} MB.")
+    return len(base64_data)
+
+
 @app.post("/api/paddleocr-vl-1.6")
-async def proxy_ocr(request: Request):
+async def proxy_paddleocr_vl(request: Request):
     """Proxy request to PaddleOCR-VL Pipeline Service."""
     try:
         ocr_request, raw_image = await parse_ocr_input(request)
-        base64_data = normalize_raw_input_to_base64(raw_image)
-        if MAX_REQUEST_BYTES > 0 and len(base64_data) > int(MAX_REQUEST_BYTES * 4 / 3) + 1024:
-            max_mb = MAX_REQUEST_BYTES / 1024 / 1024
-            raise HTTPException(status_code=413, detail=f"OCR input is too large. Max upload size is {max_mb:.0f} MB.")
-        logger.info("Received OCR Request. Base64 input size: %s bytes", len(base64_data))
+        base64_size = validate_proxy_input_size(raw_image)
+        logger.info("Received PaddleOCR-VL request. Base64 input size: %s bytes", base64_size)
         return await run_ocr_request(ocr_request, raw_image)
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Proxy Error")
+        logger.exception("PaddleOCR-VL Proxy Error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pp-ocrv6")
+async def proxy_ppocrv6(request: Request):
+    """Proxy request to PP-OCRv6 OCR Pipeline Service."""
+    try:
+        ocr_request, raw_image = await parse_ocr_input(request)
+        base64_size = validate_proxy_input_size(raw_image)
+        logger.info("Received PP-OCRv6 request. Base64 input size: %s bytes", base64_size)
+        return await run_ppocrv6_request(ocr_request, raw_image)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("PP-OCRv6 Proxy Error")
         raise HTTPException(status_code=500, detail=str(e))
 
 

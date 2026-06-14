@@ -1,0 +1,8 @@
+ARG API_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-offline
+FROM ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-vl:${API_IMAGE_TAG_SUFFIX}
+
+USER root
+
+RUN python -m pip install --no-cache-dir -U \
+    paddleocr==3.7.0 \
+    paddlex==3.7.1

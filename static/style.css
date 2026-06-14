@@ -97,6 +97,27 @@ svg {
     gap: 12px;
 }
 
+.model-select-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 28px;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.model-select-wrap select {
+    width: 168px;
+    height: 28px;
+    padding: 0 28px 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--text);
+    background: #fff;
+    font: inherit;
+}
+
 .model-pill {
     min-width: 220px;
     display: flex;
@@ -580,7 +601,38 @@ svg {
 }
 
 .result-header {
-    min-height: 62px;
+    height: 78px;
+    min-height: 78px;
+    flex: 0 0 78px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 1px;
+    padding: 4px 16px 0;
+}
+
+.result-header-main {
+    min-width: 0;
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.result-heading {
+    min-width: 0;
+}
+
+.result-header .pane-kicker {
+    margin-bottom: 2px;
+    line-height: 1.2;
+}
+
+.result-header h2 {
+    font-size: 14px;
+    line-height: 1.2;
 }
 
 .result-actions {
@@ -645,19 +697,20 @@ svg {
 
 .pdf-page-wrap {
     width: max-content;
-    max-width: 100%;
+    max-width: none;
     min-width: 0;
     margin: 0 auto;
 }
 
 .pdf-canvas-box {
     width: max-content;
-    max-width: 100%;
+    max-width: none;
     position: relative;
 }
 
 .pdf-document-flow {
-    width: 100%;
+    width: max-content;
+    min-width: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -699,6 +752,11 @@ svg {
     pointer-events: none;
 }
 
+.source-highlight-box-ocr {
+    border-width: 1px;
+    background: rgba(49, 91, 255, 0.1);
+}
+
 .source-link-hotspot {
     position: absolute;
     padding: 0;
@@ -731,18 +789,31 @@ svg {
 }
 
 .pdf-controls {
-    height: 42px;
+    width: max-content;
+    height: 46px;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    margin-top: -52px;
+    gap: 4px;
+    margin: -54px auto 8px;
+    padding: 0 12px;
     z-index: 3;
-    pointer-events: none;
+    pointer-events: auto;
+    border: 1px solid rgba(226, 232, 240, .9);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .96);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, .16);
 }
 
-.pdf-controls > * {
-    pointer-events: auto;
+.pdf-controls .icon-button {
+    width: 30px;
+    height: 30px;
+    border-radius: 999px;
+    box-shadow: none;
+}
+
+.pdf-controls .icon-button + .icon-button {
+    margin-left: 2px;
 }
 
 #page-indicator {
@@ -752,24 +823,30 @@ svg {
     align-items: center;
     justify-content: center;
     color: var(--text);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, .92);
-    box-shadow: var(--shadow);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: #fff;
+    box-shadow: none;
     font-size: 13px;
 }
 
 .view-tabs {
-    height: 50px;
-    display: flex;
+    width: max-content;
+    max-width: 100%;
+    height: 34px;
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 0 16px;
-    background: #fff;
-    border-bottom: 1px solid var(--line);
+    align-self: flex-start;
+    gap: 2px;
+    padding: 2px;
+    background: var(--panel-soft);
+    border: 1px solid var(--line);
+    border-bottom: 0;
+    border-radius: 7px 7px 0 0;
 }
 
 .view-tab {
-    height: 32px;
+    height: 28px;
     padding: 0 12px;
     border: 0;
     border-radius: 6px;
@@ -782,6 +859,25 @@ svg {
     color: var(--brand);
     background: var(--brand-soft);
     font-weight: 700;
+}
+
+.result-pane.ppocr-result-mode .view-tabs {
+    position: static;
+    z-index: 5;
+    height: 34px;
+    padding: 2px;
+    overflow: visible;
+    border-bottom: 0;
+    transform: none;
+}
+
+.result-pane.ppocr-result-mode .view-tab {
+    height: 28px;
+    background: rgba(255, 255, 255, .9);
+}
+
+.result-pane.ppocr-result-mode .view-tab.active {
+    background: var(--brand-soft);
 }
 
 .result-viewer {
@@ -816,6 +912,245 @@ svg {
     font-size: 16px;
     line-height: 1.72;
     overflow-wrap: break-word;
+}
+
+.markdown-preview.ocr-visual-mode {
+    padding: 18px 24px 34px;
+}
+
+.ocr-visual-flow {
+    width: max-content;
+    min-width: 100%;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 22px;
+    padding: 0 0 32px;
+}
+
+.ocr-visual-page {
+    width: max-content;
+    min-width: 100%;
+    display: flex;
+    justify-content: center;
+}
+
+.ocr-page-stage {
+    position: relative;
+    display: grid;
+    width: max-content;
+    max-width: none;
+    min-height: 0;
+    background: #fff;
+    overflow: visible;
+}
+
+.ocr-page-stage.loading {
+    min-height: 420px;
+}
+
+.ocr-page-stage.loading::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, rgba(248, 250, 252, .62), rgba(241, 245, 249, .86), rgba(248, 250, 252, .62));
+    animation: ocrPageLoading 1.2s linear infinite;
+}
+
+@keyframes ocrPageLoading {
+    50% {
+        opacity: .45;
+    }
+}
+
+.ocr-page-image {
+    grid-area: 1 / 1;
+    display: block;
+    max-width: none;
+    height: auto;
+    opacity: .08;
+    filter: grayscale(.08) contrast(.95);
+    user-select: none;
+    pointer-events: none;
+}
+
+.ocr-text-layer {
+    position: absolute;
+    inset: 0;
+}
+
+.ocr-text-line {
+    position: absolute;
+    box-sizing: border-box;
+    appearance: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    border: 1px solid transparent;
+    border-radius: 1px;
+    color: #111827;
+    background: transparent;
+    font-family: "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif;
+    font-weight: 500;
+    line-height: 1;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
+    cursor: text;
+}
+
+.ocr-text-line-label {
+    display: inline-block;
+    min-width: max-content;
+    max-width: none;
+    line-height: 1;
+    transform-origin: left center;
+    pointer-events: none;
+}
+
+.ocr-text-line-code {
+    font-family: Arial, "Microsoft YaHei", sans-serif;
+    font-weight: 500;
+}
+
+.ocr-text-line-compact {
+    color: transparent;
+}
+
+.ocr-text-line-compact:hover,
+.ocr-text-line-compact:focus-visible,
+.ocr-text-line-compact.active {
+    color: rgba(17, 24, 39, .58);
+}
+
+.ocr-text-line:hover,
+.ocr-text-line:focus-visible,
+.ocr-text-line.active {
+    border-color: #315bff;
+    box-shadow: inset 0 0 0 1px rgba(49, 91, 255, .2);
+    outline: none;
+}
+
+.ocr-floating-toolbar {
+    position: absolute;
+    z-index: 8;
+    min-width: 142px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 0 8px;
+    border: 1px solid rgba(203, 213, 225, .9);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .96);
+    box-shadow: 0 8px 20px rgba(15, 23, 42, .18);
+}
+
+.ocr-floating-toolbar button {
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 999px;
+    color: #1f2a44;
+    background: transparent;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ocr-floating-toolbar button:hover {
+    color: var(--brand);
+    background: var(--brand-soft);
+}
+
+.ocr-floating-toolbar svg {
+    width: 14px;
+    height: 14px;
+}
+
+.ocr-correction-popover {
+    position: absolute;
+    z-index: 9;
+    width: 278px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px;
+    border: 1px solid rgba(203, 213, 225, .95);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, .98);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, .2);
+}
+
+.ocr-correction-popover input {
+    min-width: 0;
+    flex: 1;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 12px;
+}
+
+.ocr-correction-popover input:focus {
+    outline: 2px solid var(--brand-soft);
+    border-color: var(--brand);
+}
+
+.ocr-correction-popover button {
+    height: 28px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--panel-soft);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ocr-correction-popover button[type="submit"] {
+    color: var(--brand);
+    background: var(--brand-soft);
+    font-weight: 700;
+}
+
+.ocr-text-only {
+    width: min(720px, 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 22px;
+}
+
+.ocr-text-only-line {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: var(--text);
+    background: transparent;
+    text-align: left;
+    line-height: 1.5;
+    cursor: text;
+}
+
+.ocr-text-only-line:hover,
+.ocr-text-only-line:focus-visible,
+.ocr-text-only-line.active {
+    border-color: #315bff;
+    background: rgba(49, 91, 255, .04);
+    outline: none;
 }
 
 .markdown-preview h1,
@@ -935,6 +1270,10 @@ svg {
     margin: 1em auto;
 }
 
+.markdown-preview.ocr-visual-mode .ocr-page-image {
+    margin: 0;
+}
+
 .json-preview {
     position: relative;
     padding: 0;
@@ -1021,11 +1360,16 @@ svg {
     .topbar-actions {
         width: 100%;
         justify-content: space-between;
+        flex-wrap: wrap;
+    }
+
+    .model-select-wrap select {
+        width: min(168px, 58vw);
     }
 
     .model-pill {
         min-width: 0;
-        max-width: 58vw;
+        max-width: 100%;
         overflow: hidden;
     }
 
@@ -1048,6 +1392,27 @@ svg {
     .pane-header {
         align-items: flex-start;
         flex-direction: column;
+    }
+
+    .result-header {
+        height: auto;
+        min-height: 108px;
+        flex-basis: auto;
+        align-items: stretch;
+        gap: 8px;
+        padding: 10px 12px 0;
+    }
+
+    .result-header-main {
+        width: 100%;
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .result-actions {
+        margin-left: auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
     }
 
     .markdown-preview,

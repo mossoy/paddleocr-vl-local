@@ -62,6 +62,42 @@ services:
     networks:
       - paddleocr-network
 
+  paddleocr-ocr-api:
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile.ocr
+      args:
+        API_IMAGE_TAG_SUFFIX: ${API_IMAGE_TAG_SUFFIX:-latest-nvidia-gpu-offline}
+    image: pandocr-ocr-api:latest
+    container_name: paddleocr-ocr-api
+    ports:
+      - "127.0.0.1:8082:8080"
+    environment:
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${PANDOCR_GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+    user: root
+    restart: unless-stopped
+    volumes:
+      - ./model_cache_ppocrv6:/home/paddleocr/.paddlex
+      - ./model_cache_ppocrv6_ocr:/home/paddleocr/.paddleocr
+      - ./pipeline_config_ocr_v6.yaml:/home/paddleocr/pipeline_config_ocr_v6.yaml:ro
+    command: /bin/bash -c "paddlex --serve --pipeline /home/paddleocr/pipeline_config_ocr_v6.yaml --host 0.0.0.0 --port 8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    networks:
+      - paddleocr-network
+
   pandocr-web:
     pull_policy: build
     build:
@@ -74,10 +110,14 @@ services:
     depends_on:
       paddleocr-vl-api:
         condition: service_healthy
+      paddleocr-ocr-api:
+        condition: service_healthy
     restart: unless-stopped
     environment:
       - PADDLE_SERVICE_URL=http://paddleocr-vl-api:8080/layout-parsing
+      - PADDLE_OCR_SERVICE_URL=http://paddleocr-ocr-api:8080/ocr
       - PADDLEOCR_VL_MODEL_NAME=${PADDLEOCR_VL_MODEL_NAME:-PaddleOCR-VL-1.6-0.9B}
+      - PPOCR_V6_MODEL_NAME=${PPOCR_V6_MODEL_NAME:-PP-OCRv6_medium}
       - PADDLE_REQUEST_TIMEOUT=${PADDLE_REQUEST_TIMEOUT:-3600}
       - PANDOCR_TASK_DATA_DIR=/app/data/tasks
       - PANDOCR_CORS_ORIGINS=${PANDOCR_CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
