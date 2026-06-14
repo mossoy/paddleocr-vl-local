@@ -3,6 +3,7 @@ import io
 import os
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from pypdf import PdfReader, PdfWriter
@@ -14,6 +15,7 @@ class ServerTaskApiTests(unittest.TestCase):
         cls.temp_dir = tempfile.TemporaryDirectory()
         os.environ["PANDOCR_TASK_DATA_DIR"] = cls.temp_dir.name
         os.environ["PANDOCR_MAX_UPLOAD_MB"] = "1"
+        os.environ["PANDOCR_MODEL_CONTROL"] = "none"
         cls.server = importlib.import_module("server")
         cls.client = TestClient(cls.server.app)
 
@@ -71,6 +73,21 @@ class ServerTaskApiTests(unittest.TestCase):
         model_ids = [model["id"] for model in response.json()["data"]]
         self.assertIn("paddleocr-vl-1.6", model_ids)
         self.assertIn("pp-ocrv6", model_ids)
+
+    def test_model_runtime_reports_both_models(self):
+        with patch.object(self.server, "check_http_health", new=AsyncMock(return_value=False)):
+            response = self.client.get("/api/model-runtime")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("models", payload)
+        self.assertIn("paddleocr-vl-1.6", payload["models"])
+        self.assertIn("pp-ocrv6", payload["models"])
+        self.assertIn("controlAvailable", payload)
+
+    def test_model_runtime_switch_requires_docker_control(self):
+        with patch.object(self.server, "model_control_available", return_value=False):
+            response = self.client.post("/api/model-runtime/switch", json={"modelId": "pp-ocrv6"})
+        self.assertEqual(response.status_code, 503)
 
     def test_invalid_task_id_is_rejected(self):
         response = self.client.get("/api/tasks/bad!")

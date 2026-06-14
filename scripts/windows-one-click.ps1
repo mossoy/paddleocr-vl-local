@@ -15,6 +15,7 @@ Set-StrictMode -Version 2.0
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $script:RuntimeEnv = ""
 $script:DiagnosticsShown = $false
+$script:ActiveModel = "paddleocr-vl-1.6"
 Set-Location $script:RepoRoot
 
 function Write-Section {
@@ -168,6 +169,40 @@ function Set-EnvLine {
     return [string[]]$updated.ToArray()
 }
 
+function Ensure-EnvLine {
+    param(
+        [string[]]$Lines,
+        [string]$Key,
+        [string]$Value
+    )
+
+    $pattern = "^\s*" + [regex]::Escape($Key) + "\s*="
+    foreach ($line in $Lines) {
+        if ($line -match $pattern) {
+            return $Lines
+        }
+    }
+
+    return [string[]]($Lines + "$Key=$Value")
+}
+
+function Get-EnvLineValue {
+    param(
+        [string[]]$Lines,
+        [string]$Key,
+        [string]$DefaultValue
+    )
+
+    $pattern = "^\s*" + [regex]::Escape($Key) + "\s*=\s*(.*)\s*$"
+    foreach ($line in $Lines) {
+        if ($line -match $pattern) {
+            return $Matches[1].Trim()
+        }
+    }
+
+    return $DefaultValue
+}
+
 function New-RuntimeEnvFile {
     param([string]$BaseEnvFile, [object]$Gpu)
 
@@ -177,6 +212,10 @@ function New-RuntimeEnvFile {
     $runtimeEnv = Join-Path $tmpDir "windows-one-click.env"
     $lines = [string[]](Get-Content -Path $BaseEnvFile -Encoding UTF8)
     $lines = Set-EnvLine -Lines $lines -Key "PANDOCR_GPU_DEVICE_ID" -Value ([string]$Gpu.Index)
+    $lines = Ensure-EnvLine -Lines $lines -Key "PANDOCR_MODEL_CONTROL" -Value "docker"
+    $lines = Ensure-EnvLine -Lines $lines -Key "PANDOCR_ACTIVE_MODEL_ON_START" -Value "paddleocr-vl-1.6"
+    $lines = Ensure-EnvLine -Lines $lines -Key "PANDOCR_MODEL_SWITCH_TIMEOUT" -Value "1200"
+    $script:ActiveModel = Get-EnvLineValue -Lines $lines -Key "PANDOCR_ACTIVE_MODEL_ON_START" -DefaultValue "paddleocr-vl-1.6"
     Set-Content -Path $runtimeEnv -Value $lines -Encoding ASCII
 
     return (Resolve-Path $runtimeEnv).Path
@@ -231,7 +270,7 @@ function Show-Diagnostics {
 function Wait-ForServices {
     param([int]$Timeout)
 
-    Write-Section "Waiting for services"
+    Write-Section "Waiting for WebUI and active model ($script:ActiveModel)"
     $deadline = (Get-Date).AddSeconds($Timeout)
     $lastLine = ""
 
@@ -244,15 +283,26 @@ function Wait-ForServices {
         $ocrOk = Test-HttpOk "http://localhost:8082/health"
         $webOk = Test-HttpOk "http://localhost:8000/"
 
-        if ($apiOk -and $ocrOk -and $webOk) {
-            Write-Ok "All services are healthy."
+        $activeOk = $false
+        $activeStatuses = @()
+        if ($script:ActiveModel -eq "pp-ocrv6") {
+            $activeOk = $ocrOk
+            $activeStatuses = @($ocr, $web)
+        }
+        else {
+            $activeOk = $apiOk
+            $activeStatuses = @($vlm, $api, $web)
+        }
+
+        if ($activeOk -and $webOk) {
+            Write-Ok "WebUI and $script:ActiveModel are healthy. The other model remains on standby."
             return
         }
 
-        foreach ($status in @($vlm, $api, $ocr, $web)) {
+        foreach ($status in $activeStatuses) {
             if ($status -match "^exited\|") {
                 Show-Diagnostics
-                throw "A service exited before becoming healthy."
+                throw "An active service exited before becoming healthy."
             }
         }
 
@@ -266,7 +316,7 @@ function Wait-ForServices {
     }
 
     Show-Diagnostics
-    throw "Timed out after $Timeout seconds while waiting for services."
+    throw "Timed out after $Timeout seconds while waiting for WebUI and $script:ActiveModel."
 }
 
 try {
@@ -328,7 +378,8 @@ try {
     }
 
     Invoke-Checked -File "docker" -Arguments (Get-ComposeArgs @("run", "--rm", "--no-deps", "paddleocr-vlm-server", "nvidia-smi")) -Description "Checking Docker GPU access"
-    Invoke-Checked -File "docker" -Arguments (Get-ComposeArgs @("up", "-d", "--force-recreate")) -Description "Starting PandOCR services"
+    Invoke-Checked -File "docker" -Arguments (Get-ComposeArgs @("up", "-d", "--no-start", "--force-recreate")) -Description "Creating PandOCR containers"
+    Invoke-Checked -File "docker" -Arguments (Get-ComposeArgs @("start", "pandocr-web")) -Description "Starting WebUI and model runtime controller"
 
     Wait-ForServices -Timeout $TimeoutSeconds
 
@@ -336,6 +387,7 @@ try {
     Write-Host "WebUI: http://localhost:8000"
     Write-Host "VL API health: http://localhost:8081/health"
     Write-Host "OCR API health: http://localhost:8082/health"
+    Write-Host "Active model on startup: $script:ActiveModel. Select another model in the UI to stop this one and start the other."
     Write-Host "Useful logs: docker compose --env-file `"$script:RuntimeEnv`" logs -f"
 
     if (-not $NoOpen) {

@@ -1,4 +1,5 @@
 import os
+import asyncio
 import base64
 import httpx
 import subprocess
@@ -8,6 +9,7 @@ import io
 import json
 import re
 import logging
+import time
 from pathlib import Path
 from PIL import Image
 from typing import List, Optional, Union
@@ -38,10 +40,261 @@ TASK_DATA_DIR = Path(os.getenv("PANDOCR_TASK_DATA_DIR", "data/tasks")).resolve()
 MAX_REQUEST_BYTES = int(float(os.getenv("PANDOCR_MAX_UPLOAD_MB", "512")) * 1024 * 1024)
 PANDOCR_HOST = os.getenv("PANDOCR_HOST", "0.0.0.0")
 PANDOCR_PORT = int(os.getenv("PANDOCR_PORT", "8000"))
+MODEL_CONTROL_MODE = os.getenv("PANDOCR_MODEL_CONTROL", "docker").strip().lower()
+MODEL_RUNTIME_STARTUP = os.getenv("PANDOCR_ACTIVE_MODEL_ON_START", "paddleocr-vl-1.6").strip()
+DOCKER_SOCKET_PATH = os.getenv("PANDOCR_DOCKER_SOCKET", "/var/run/docker.sock")
+MODEL_SWITCH_TIMEOUT = float(os.getenv("PANDOCR_MODEL_SWITCH_TIMEOUT", "1200"))
 CORS_ORIGINS = parse_csv_env(
     "PANDOCR_CORS_ORIGINS",
     "http://localhost:8000,http://127.0.0.1:8000",
 )
+
+MODEL_RUNTIME_CONFIG = {
+    "paddleocr-vl-1.6": {
+        "containers": ["paddleocr-vlm-server", "paddleocr-vl-api"],
+        "start_order": ["paddleocr-vlm-server", "paddleocr-vl-api"],
+        "stop_order": ["paddleocr-vl-api", "paddleocr-vlm-server"],
+        "health_url": PADDLE_SERVICE_URL.rsplit("/", 1)[0] + "/health",
+    },
+    "pp-ocrv6": {
+        "containers": ["paddleocr-ocr-api"],
+        "start_order": ["paddleocr-ocr-api"],
+        "stop_order": ["paddleocr-ocr-api"],
+        "health_url": PADDLE_OCR_SERVICE_URL.rsplit("/", 1)[0] + "/health",
+    },
+}
+DEFAULT_RUNTIME_MODEL_ID = MODEL_RUNTIME_STARTUP if MODEL_RUNTIME_STARTUP in MODEL_RUNTIME_CONFIG else "paddleocr-vl-1.6"
+
+model_runtime_lock = asyncio.Lock()
+model_runtime_operation = {
+    "targetModelId": DEFAULT_RUNTIME_MODEL_ID,
+    "state": "idle",
+    "message": "",
+    "startedAt": None,
+    "updatedAt": None,
+}
+model_runtime_task: asyncio.Task | None = None
+
+
+class ModelSwitchRequest(BaseModel):
+    modelId: str
+
+
+def model_catalog() -> list[dict]:
+    return [
+        {
+            "id": "paddleocr-vl-1.6",
+            "name": PADDLEOCR_VL_MODEL_NAME,
+            "label": "PaddleOCR-VL 1.6",
+            "kind": "document_parsing",
+            "endpoint": "/api/paddleocr-vl-1.6",
+        },
+        {
+            "id": "pp-ocrv6",
+            "name": PPOCR_V6_MODEL_NAME,
+            "label": "PP-OCRv6",
+            "kind": "text_ocr",
+            "endpoint": "/api/pp-ocrv6",
+        },
+    ]
+
+
+def model_control_available() -> bool:
+    return MODEL_CONTROL_MODE == "docker" and Path(DOCKER_SOCKET_PATH).exists()
+
+
+async def docker_api_request(method: str, path: str, *, timeout: float = 30) -> httpx.Response:
+    transport = httpx.AsyncHTTPTransport(uds=DOCKER_SOCKET_PATH)
+    async with httpx.AsyncClient(transport=transport, base_url="http://docker", timeout=timeout) as client:
+        return await client.request(method, path)
+
+
+async def inspect_container(name: str) -> dict:
+    if not model_control_available():
+        return {
+            "name": name,
+            "exists": False,
+            "running": False,
+            "state": "unknown",
+            "health": "unknown",
+        }
+
+    response = await docker_api_request("GET", f"/containers/{name}/json")
+    if response.status_code == 404:
+        return {
+            "name": name,
+            "exists": False,
+            "running": False,
+            "state": "missing",
+            "health": "missing",
+        }
+    response.raise_for_status()
+    payload = response.json()
+    state = payload.get("State") or {}
+    health = state.get("Health") or {}
+    return {
+        "name": name,
+        "exists": True,
+        "running": bool(state.get("Running")),
+        "state": state.get("Status") or "unknown",
+        "health": health.get("Status") or "none",
+    }
+
+
+async def docker_container_action(name: str, action: str) -> None:
+    if not model_control_available():
+        raise RuntimeError("Docker model control is not available")
+    if action == "stop":
+        response = await docker_api_request("POST", f"/containers/{name}/stop?t=20", timeout=45)
+        if response.status_code in {204, 304, 404}:
+            return
+    elif action == "start":
+        response = await docker_api_request("POST", f"/containers/{name}/start", timeout=45)
+        if response.status_code in {204, 304}:
+            return
+    else:
+        raise ValueError(f"Unsupported container action: {action}")
+    if response.status_code >= 400:
+        raise RuntimeError(f"Docker {action} failed for {name}: {response.text}")
+
+
+async def check_http_health(url: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(url)
+        return 200 <= response.status_code < 300
+    except Exception:
+        return False
+
+
+async def model_runtime_status(model_id: str) -> dict:
+    config = MODEL_RUNTIME_CONFIG[model_id]
+    containers = [await inspect_container(name) for name in config["containers"]]
+    if not model_control_available():
+        health_ok = await check_http_health(config["health_url"])
+        return {
+            "id": model_id,
+            "containers": containers,
+            "running": health_ok,
+            "ready": health_ok,
+            "state": "ready" if health_ok else "unknown",
+            "healthUrl": config["health_url"],
+        }
+
+    any_running = any(container["running"] for container in containers)
+    all_running = all(container["running"] for container in containers)
+    any_missing = any(not container["exists"] for container in containers)
+    health_ok = await check_http_health(config["health_url"]) if all_running else False
+
+    if any_missing:
+        state = "missing"
+    elif health_ok:
+        state = "ready"
+    elif any_running:
+        state = "starting" if all_running else "partial"
+    else:
+        state = "stopped"
+
+    return {
+        "id": model_id,
+        "containers": containers,
+        "running": any_running,
+        "ready": health_ok,
+        "state": state,
+        "healthUrl": config["health_url"],
+    }
+
+
+async def build_model_runtime_payload() -> dict:
+    models = {
+        model_id: await model_runtime_status(model_id)
+        for model_id in MODEL_RUNTIME_CONFIG
+    }
+    ready_models = [model_id for model_id, status in models.items() if status["ready"]]
+    running_models = [model_id for model_id, status in models.items() if status["running"]]
+    active_model = ready_models[0] if ready_models else (running_models[0] if running_models else None)
+    return {
+        "controlMode": MODEL_CONTROL_MODE,
+        "controlAvailable": model_control_available(),
+        "activeModelId": active_model,
+        "defaultModelId": DEFAULT_RUNTIME_MODEL_ID,
+        "operation": dict(model_runtime_operation),
+        "models": models,
+    }
+
+
+def set_model_runtime_operation(state: str, message: str = "", target_model_id: str | None = None) -> None:
+    now = time.time()
+    if target_model_id:
+        model_runtime_operation["targetModelId"] = target_model_id
+    model_runtime_operation["state"] = state
+    model_runtime_operation["message"] = message
+    model_runtime_operation["updatedAt"] = now
+    if state == "switching":
+        model_runtime_operation["startedAt"] = now
+
+
+async def wait_model_ready(model_id: str, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = await model_runtime_status(model_id)
+        if status["ready"]:
+            return
+        await asyncio.sleep(3)
+    raise TimeoutError(f"Timed out waiting for {model_id} to become ready")
+
+
+async def wait_container_runtime_ready(container_name: str, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = await inspect_container(container_name)
+        if not status["exists"]:
+            raise RuntimeError(f"Docker container {container_name} is missing. Run docker compose up --no-start first.")
+        if status["running"] and status["health"] in {"healthy", "none"}:
+            return
+        await asyncio.sleep(3)
+    raise TimeoutError(f"Timed out waiting for Docker container {container_name} to become healthy")
+
+
+async def activate_model_runtime(model_id: str) -> None:
+    if model_id not in MODEL_RUNTIME_CONFIG:
+        raise ValueError(f"Unknown model id: {model_id}")
+    if not model_control_available():
+        raise RuntimeError("Docker model control is not available")
+
+    async with model_runtime_lock:
+        set_model_runtime_operation("switching", f"Switching to {model_id}", model_id)
+        switch_started_at = time.monotonic()
+        try:
+            for other_model_id, config in MODEL_RUNTIME_CONFIG.items():
+                if other_model_id == model_id:
+                    continue
+                for container_name in config["stop_order"]:
+                    await docker_container_action(container_name, "stop")
+
+            for container_name in MODEL_RUNTIME_CONFIG[model_id]["start_order"]:
+                remaining_timeout = max(3, MODEL_SWITCH_TIMEOUT - (time.monotonic() - switch_started_at))
+                await docker_container_action(container_name, "start")
+                await wait_container_runtime_ready(container_name, remaining_timeout)
+
+            remaining_timeout = max(3, MODEL_SWITCH_TIMEOUT - (time.monotonic() - switch_started_at))
+            await wait_model_ready(model_id, remaining_timeout)
+            set_model_runtime_operation("ready", f"{model_id} is ready", model_id)
+        except Exception as err:
+            logger.exception("Model runtime switch failed")
+            set_model_runtime_operation("error", str(err), model_id)
+
+
+def schedule_model_runtime_activation(model_id: str) -> None:
+    global model_runtime_task
+    if model_id not in MODEL_RUNTIME_CONFIG:
+        raise HTTPException(status_code=400, detail="Unknown model id")
+    if not model_control_available():
+        raise HTTPException(status_code=503, detail="Docker model control is not available")
+    if model_runtime_task and not model_runtime_task.done():
+        model_runtime_task.cancel()
+    set_model_runtime_operation("switching", f"Switching to {model_id}", model_id)
+    model_runtime_task = asyncio.create_task(activate_model_runtime(model_id))
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +305,12 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.on_event("startup")
+async def autostart_default_model_runtime():
+    if model_control_available():
+        schedule_model_runtime_activation(DEFAULT_RUNTIME_MODEL_ID)
 
 
 @app.middleware("http")
@@ -80,24 +339,20 @@ async def read_root():
 async def get_models():
     """Return OCR models available through this proxy."""
     return {
-        "default": "paddleocr-vl-1.6",
-        "data": [
-            {
-                "id": "paddleocr-vl-1.6",
-                "name": PADDLEOCR_VL_MODEL_NAME,
-                "label": "PaddleOCR-VL 1.6",
-                "kind": "document_parsing",
-                "endpoint": "/api/paddleocr-vl-1.6",
-            },
-            {
-                "id": "pp-ocrv6",
-                "name": PPOCR_V6_MODEL_NAME,
-                "label": "PP-OCRv6",
-                "kind": "text_ocr",
-                "endpoint": "/api/pp-ocrv6",
-            },
-        ],
+        "default": DEFAULT_RUNTIME_MODEL_ID,
+        "data": model_catalog(),
     }
+
+
+@app.get("/api/model-runtime")
+async def get_model_runtime():
+    return await build_model_runtime_payload()
+
+
+@app.post("/api/model-runtime/switch")
+async def switch_model_runtime(request: ModelSwitchRequest):
+    schedule_model_runtime_activation(request.modelId)
+    return await build_model_runtime_payload()
 
 
 def safe_task_id(task_id: str) -> str:
@@ -734,6 +989,10 @@ def parse_ppocr_response(data: dict) -> dict:
 
 
 async def run_ocr_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> dict:
+    runtime = await model_runtime_status("paddleocr-vl-1.6")
+    if not runtime["ready"]:
+        raise HTTPException(status_code=503, detail="PaddleOCR-VL service is not ready. Switch to this model and wait for it to become ready.")
+
     base64_data, file_type = prepare_service_input(ocr_request, raw_input)
 
     payload = build_pipeline_payload(ocr_request, base64_data, file_type)
@@ -757,6 +1016,10 @@ async def run_ocr_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> di
 
 
 async def run_ppocrv6_request(ocr_request: OCRRequest, raw_input: RawOCRInput) -> dict:
+    runtime = await model_runtime_status("pp-ocrv6")
+    if not runtime["ready"]:
+        raise HTTPException(status_code=503, detail="PP-OCRv6 service is not ready. Switch to this model and wait for it to become ready.")
+
     base64_data, file_type = prepare_service_input(ocr_request, raw_input)
     payload = build_ppocr_payload(ocr_request, base64_data, file_type)
 

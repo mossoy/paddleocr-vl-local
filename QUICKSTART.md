@@ -92,28 +92,29 @@ docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 ### 3. 启动服务
 
 ```powershell
-docker compose --env-file env.txt up -d
+docker compose --env-file env.txt up -d --no-start
+docker compose --env-file env.txt start pandocr-web
 ```
 
-首次启动 VLM 服务会加载模型，可能需要几分钟。
+首次启动默认模型会加载权重，可能需要几分钟。单 GPU 部署默认只热加载 `PaddleOCR-VL 1.6`；切到 `PP-OCRv6` 时，WebUI 会先停止 VL 相关容器，再启动 PP-OCRv6 容器。
 
 ### 4. 验证
 
 ```powershell
 docker compose --env-file env.txt ps
 curl http://localhost:8000/api/models
+curl http://localhost:8000/api/model-runtime
 curl http://localhost:8081/health
-curl http://localhost:8082/health
 ```
 
-期望看到 4 个容器：
+期望看到 4 个容器，其中只有 `pandocr-web` 和当前活跃模型在 running/healthy，另一个模型处于 created/exited/standby 属于正常：
 
 - `paddleocr-vlm-server`
 - `paddleocr-vl-api`
 - `paddleocr-ocr-api`
 - `pandocr-web`
 
-`/api/models` 应返回 `paddleocr-vl-1.6` 和 `pp-ocrv6`。
+`/api/models` 应返回 `paddleocr-vl-1.6` 和 `pp-ocrv6`，`/api/model-runtime` 应返回当前活跃模型和每个模型的容器状态。
 
 ### 5. 使用
 
@@ -141,7 +142,8 @@ unexpected status ... docker.m.daocloud.io ... 403 Forbidden
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
 docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
-docker compose --env-file env.txt up -d
+docker compose --env-file env.txt up -d --no-start
+docker compose --env-file env.txt start pandocr-web
 ```
 
 不要单独执行旧版本文档里的 `docker compose --env-file env.txt pull`。如果 403 出现在其他 Docker Hub 镜像上，再检查 Docker Desktop 的 registry mirror 配置，移除或更换返回 403 的 `docker.m.daocloud.io` 镜像源。
@@ -159,14 +161,16 @@ docker compose --env-file env.txt logs --tail=200 paddleocr-vlm-server
 ```powershell
 docker compose --env-file env.docker pull paddleocr-vlm-server paddleocr-vl-api
 docker compose --env-file env.docker build paddleocr-ocr-api pandocr-web
-docker compose --env-file env.docker up -d
+docker compose --env-file env.docker up -d --no-start
+docker compose --env-file env.docker start pandocr-web
 ```
 
 如果之前已经启动失败过，先清掉旧的 unhealthy 容器再重启：
 
 ```powershell
 docker compose --env-file env.txt down
-docker compose --env-file env.txt up -d --force-recreate
+docker compose --env-file env.txt up -d --no-start --force-recreate
+docker compose --env-file env.txt start pandocr-web
 ```
 
 首次启动 VLM 会加载模型，可能需要 10-15 分钟。若日志提示显存不足，请关闭占用 GPU 的程序，或在 `env.txt` / `env.docker` 中把 `PANDOCR_GPU_DEVICE_ID` 改成另一张空闲显卡的编号。

@@ -26,12 +26,14 @@ The NVIDIA Compose stack keeps four services:
 - `paddleocr-ocr-api`
 - `paddleocr-vlm-server`
 
+For single-GPU machines, the Docker deployment keeps only one OCR model hot-loaded by default. `pandocr-web` stays online and controls the model containers through the Docker socket: selecting `PaddleOCR-VL 1.6` starts `paddleocr-vlm-server` + `paddleocr-vl-api` and stops `paddleocr-ocr-api`; selecting `PP-OCRv6` does the reverse. The UI polls this runtime state in real time.
+
 The project no longer includes rerank/reranker services, and it no longer installs Paddle/PaddleX inside the Web container.
 
 ## Features
 
 - Supports image, PDF, PPT/PPTX, and DOC/DOCX uploads.
-- Supports model switching between `PaddleOCR-VL 1.6` document parsing and `PP-OCRv6` text OCR.
+- Supports model switching between `PaddleOCR-VL 1.6` document parsing and `PP-OCRv6` text OCR, with Docker-based on-demand start/stop for single-GPU deployments.
 - Sends PDFs to PaddleOCR-VL page by page, making it easier to compare with the official online parsing result and reliably keep the raw JSON for each page.
 - Renders PP-OCRv6 results with an official-style visual OCR layer: source/result pages stay aligned, scrolling and zooming are synchronized, recognized text can be copied or corrected, and raw JSON remains available.
 - Persists parsing tasks locally under `data/tasks/`, so history remains available after refreshing the page. Deleting a task also removes the local record.
@@ -54,7 +56,7 @@ For Windows NVIDIA users, the recommended path is the one-click script:
 .\windows-one-click.bat
 ```
 
-It checks Docker, detects the NVIDIA GPU, selects `env.txt` or `env.docker`, pulls the official PaddleOCR-VL images, builds `pandocr-web`, clears old containers, starts the stack, waits for health checks, and prints key logs on failure.
+It checks Docker, detects the NVIDIA GPU, selects `env.txt` or `env.docker`, pulls the official PaddleOCR-VL images, builds `pandocr-web`, clears old containers, creates all model containers without starting both models, starts the WebUI, waits for the active model health check, and prints key logs on failure.
 
 Useful one-click options:
 
@@ -79,16 +81,17 @@ The commands below use `env.txt` for RTX 50 series as an example. For RTX 30/40 
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
 docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
-docker compose --env-file env.txt up -d
+docker compose --env-file env.txt up -d --no-start
+docker compose --env-file env.txt start pandocr-web
 ```
 
 Open:
 
 - WebUI: http://localhost:8000
-- PaddleOCR-VL API health: http://localhost:8081/health
-- PP-OCRv6 API health: http://localhost:8082/health
+- PaddleOCR-VL API health: http://localhost:8081/health, available when `PaddleOCR-VL 1.6` is the active model.
+- PP-OCRv6 API health: http://localhost:8082/health, available when `PP-OCRv6` is the active model.
 
-By default, Compose binds the WebUI and PaddleOCR-VL API only to `127.0.0.1` to avoid unauthorized LAN access. If you need access from another machine, confirm your network access controls first, then adjust the port bindings in `docker-compose.yml` and `PANDOCR_CORS_ORIGINS`.
+By default, Compose binds the WebUI and OCR APIs only to `127.0.0.1` to avoid unauthorized LAN access. `pandocr-web` mounts `/var/run/docker.sock` so it can start and stop only the model containers defined in this compose file; treat this as Docker host management access and do not expose the WebUI to untrusted networks without additional controls.
 
 Check status:
 
@@ -107,6 +110,9 @@ VLM_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-sm120-offline
 PANDOCR_GPU_DEVICE_ID=0
 PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
 PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
+PANDOCR_MODEL_CONTROL=docker
+PANDOCR_ACTIVE_MODEL_ON_START=paddleocr-vl-1.6
+PANDOCR_MODEL_SWITCH_TIMEOUT=1200
 PADDLE_REQUEST_TIMEOUT=3600
 PANDOCR_CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
 PANDOCR_MAX_UPLOAD_MB=512
@@ -238,6 +244,8 @@ Complex PDFs, table/formula-heavy pages, large images, and native mode will be n
 
 - `GET /`: WebUI home page.
 - `GET /api/models`: Returns available models and their proxy endpoints.
+- `GET /api/model-runtime`: Returns active model, readiness, container state, and current switch operation.
+- `POST /api/model-runtime/switch`: Starts the selected model containers and stops the inactive model containers when Docker model control is enabled.
 - `GET /api/tasks`: Reads the local persistent task summary list without returning large source files or OCR results.
 - `GET /api/tasks/{task_id}`: Reads the full details of one task.
 - `PUT /api/tasks/{task_id}`: Saves one task to `data/tasks/`.
@@ -280,7 +288,7 @@ Complex PDFs, table/formula-heavy pages, large images, and native mode will be n
 
 ## Local Development
 
-When running `server.py` locally, you need an existing PaddleOCR-VL service listening at `http://localhost:8081/layout-parsing`. To use PP-OCRv6 locally, also start a PaddleX OCR service at `http://localhost:8082/ocr` or set `PADDLE_OCR_SERVICE_URL`.
+When running `server.py` locally outside Docker, set `PANDOCR_MODEL_CONTROL=none` and start the model services yourself. You need an existing PaddleOCR-VL service listening at `http://localhost:8081/layout-parsing`. To use PP-OCRv6 locally, also start a PaddleX OCR service at `http://localhost:8082/ocr` or set `PADDLE_OCR_SERVICE_URL`.
 
 ```powershell
 pip install -r requirements.txt

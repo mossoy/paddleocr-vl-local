@@ -37,6 +37,10 @@ let jsonRenderToken = 0;
 let ppocrScrollSyncFrame = 0;
 let sourceScrollSyncFrame = 0;
 let splitScrollSyncLocked = false;
+let modelRuntime = null;
+let modelRuntimePollTimer = null;
+let modelRuntimeLoadInFlight = false;
+let modelSwitchInFlight = false;
 const sourcePdfCache = new Map();
 const sourceBytesCache = new Map();
 const JSON_LINE_HEIGHT = 21;
@@ -180,12 +184,42 @@ async function checkBackendConnection() {
         }
         localStorage.setItem(MODEL_STORAGE_KEY, selectedModelId);
         renderModelSelect();
-        els.statusDot.className = 'dot connected';
+        await loadModelRuntime({ silent: true });
+        startModelRuntimePolling();
         updateActiveModelDisplay(getActiveTask());
     } catch (error) {
         els.statusDot.className = 'dot error';
         els.statusText.textContent = '模型未连接';
+        els.statusText.textContent = '模型未连接';
         setTimeout(checkBackendConnection, 5000);
+    }
+}
+
+function startModelRuntimePolling() {
+    if (modelRuntimePollTimer) return;
+    modelRuntimePollTimer = window.setInterval(() => {
+        loadModelRuntime({ silent: true }).catch((error) => {
+            console.warn('Model runtime polling failed', error);
+        });
+    }, 2500);
+}
+
+async function loadModelRuntime({ silent = false } = {}) {
+    if (modelRuntimeLoadInFlight) return modelRuntime;
+    modelRuntimeLoadInFlight = true;
+    try {
+        const response = await fetch(`${API_BASE}/model-runtime`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(await response.text());
+        modelRuntime = await response.json();
+        updateActiveModelDisplay(getActiveTask());
+        updateActionState(getActiveTask());
+        return modelRuntime;
+    } catch (error) {
+        if (!silent) console.warn('Model runtime status failed', error);
+        updateActiveModelDisplay(getActiveTask());
+        return modelRuntime;
+    } finally {
+        modelRuntimeLoadInFlight = false;
     }
 }
 
@@ -224,10 +258,13 @@ function renderModelSelect() {
     });
 }
 
-function handleModelSelectionChange() {
+async function handleModelSelectionChange() {
     selectedModelId = els.modelSelect.value || DEFAULT_MODEL_ID;
     localStorage.setItem(MODEL_STORAGE_KEY, selectedModelId);
     updateActiveModelDisplay(getActiveTask());
+    updateActionState(getActiveTask());
+    await loadModelRuntime({ silent: true });
+    await switchModelRuntime(selectedModelId, { wait: false });
 }
 
 function getSelectedModel() {
@@ -270,10 +307,129 @@ function modelApiUrl(model) {
     return `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
 }
 
+function getModelRuntimeStatus(modelId) {
+    return modelRuntime?.models?.[modelId] || null;
+}
+
+function isModelRuntimeReady(modelId) {
+    if (!modelRuntime) return true;
+    return Boolean(getModelRuntimeStatus(modelId)?.ready);
+}
+
+function isModelRuntimeSwitching(modelId = null) {
+    const operation = modelRuntime?.operation;
+    if (modelSwitchInFlight) return !modelId || selectedModelId === modelId;
+    return operation?.state === 'switching' && (!modelId || operation.targetModelId === modelId);
+}
+
+function canSwitchModelRuntime(modelId) {
+    if (!modelRuntime) return true;
+    const status = getModelRuntimeStatus(modelId);
+    return Boolean(modelRuntime.controlAvailable && status?.state !== 'missing');
+}
+
+function modelRuntimeDotClass(modelId) {
+    const status = getModelRuntimeStatus(modelId);
+    const operation = modelRuntime?.operation;
+    if (!modelRuntime || isModelRuntimeSwitching(modelId) || status?.state === 'starting' || status?.state === 'partial') {
+        return 'dot connecting';
+    }
+    if (status?.ready) return 'dot connected';
+    if (operation?.state === 'error' && operation.targetModelId === modelId) return 'dot error';
+    if (status?.state === 'missing') return 'dot error';
+    return 'dot connecting';
+}
+
+function modelRuntimeStatusText(model) {
+    const modelName = modelDisplayName(model);
+    const status = getModelRuntimeStatus(model.id);
+    const operation = modelRuntime?.operation;
+    if (!modelRuntime) return `${modelName} 状态检查中`;
+    if (status?.ready) return `${modelName} 就绪`;
+    if (isModelRuntimeSwitching(model.id) || status?.state === 'starting' || status?.state === 'partial') {
+        return `${modelName} 启动中`;
+    }
+    if (operation?.state === 'error' && operation.targetModelId === model.id) {
+        return `${modelName} 启动失败`;
+    }
+    if (status?.state === 'missing') return `${modelName} 容器未创建`;
+    if (status?.state === 'stopped') return `${modelName} 待启动`;
+    if (modelRuntime.controlAvailable === false) return `${modelName} 未就绪`;
+    return `${modelName} 未就绪`;
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function switchModelRuntime(modelId, { wait = false } = {}) {
+    const model = availableModels.find((item) => item.id === modelId) || getSelectedModel();
+    if (isModelRuntimeReady(modelId)) {
+        updateActiveModelDisplay(getActiveTask());
+        updateActionState(getActiveTask());
+        return true;
+    }
+    if (!canSwitchModelRuntime(modelId)) {
+        updateActiveModelDisplay(getActiveTask());
+        updateActionState(getActiveTask());
+        return false;
+    }
+
+    modelSwitchInFlight = true;
+    updateActiveModelDisplay(getActiveTask());
+    updateActionState(getActiveTask());
+    try {
+        const response = await fetch(`${API_BASE}/model-runtime/switch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelId })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        modelRuntime = await response.json();
+        updateActiveModelDisplay(getActiveTask());
+        updateActionState(getActiveTask());
+        if (wait) return await waitForModelRuntimeReady(modelId);
+        return true;
+    } catch (error) {
+        console.error(error);
+        els.statusDot.className = 'dot error';
+        els.statusText.textContent = `${modelDisplayName(model)} 启动失败`;
+        return false;
+    } finally {
+        modelSwitchInFlight = false;
+        updateActiveModelDisplay(getActiveTask());
+        updateActionState(getActiveTask());
+    }
+}
+
+async function waitForModelRuntimeReady(modelId, timeoutMs = 20 * 60 * 1000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        await loadModelRuntime({ silent: true });
+        if (isModelRuntimeReady(modelId)) return true;
+        const operation = modelRuntime?.operation;
+        if (operation?.targetModelId === modelId && operation.state === 'error') {
+            throw new Error(operation.message || '模型启动失败');
+        }
+        await sleep(2500);
+    }
+    throw new Error('模型启动超时');
+}
+
+async function ensureModelRuntimeReadyForTask(task, model) {
+    if (isModelRuntimeReady(model.id)) return true;
+    const switched = await switchModelRuntime(model.id, { wait: true });
+    if (switched && isModelRuntimeReady(model.id)) return true;
+    alert(`${modelDisplayName(model)} 还没有就绪，请稍后再试。`);
+    updateActionState(task);
+    return false;
+}
+
 function updateActiveModelDisplay(task = null) {
     const selectedModel = getSelectedModel();
     const activeModel = task?.modelId ? getTaskModel(task) : selectedModel;
-    els.statusText.textContent = modelDisplayName(selectedModel);
+    els.statusDot.className = modelRuntimeDotClass(selectedModel.id);
+    els.statusText.textContent = modelRuntimeStatusText(selectedModel);
     els.activeModelName.textContent = modelShortName(activeModel);
 }
 
@@ -1814,12 +1970,18 @@ async function processTask(task, { confirmCompleted = true } = {}) {
     if (!task || isProcessing) return;
     if (confirmCompleted && task.status === 'completed' && !confirm('这个任务已经解析完成，要重新解析吗？')) return;
 
+    const resumeExistingResults = shouldResumeTask(task);
+    const targetModel = resumeExistingResults
+        ? getTaskModel(task)
+        : ((confirmCompleted || !task.modelId) ? getSelectedModel() : getTaskModel(task));
+    const modelReady = await ensureModelRuntimeReadyForTask(task, targetModel);
+    if (!modelReady) return;
+
     isProcessing = true;
     try {
         if (shouldRebuildPdfBatchPlan(task)) {
             rebuildPdfBatchPlan(task);
         }
-        const resumeExistingResults = shouldResumeTask(task);
         if (resumeExistingResults) {
             task.batches.forEach((batch) => {
                 if (batch.status === 'processing') batch.status = 'pending';
@@ -2061,18 +2223,24 @@ function taskForPersistence(task) {
 
 function updateActionState(task) {
     const hasResult = Boolean(task?.markdown) || Boolean(task?.ocrResults?.length);
-    els.startBtn.disabled = !task || !isTaskDetailLoaded(task) || isProcessing;
+    const taskModel = task ? getTaskModel(task) : getSelectedModel();
+    const modelReady = !task || isModelRuntimeReady(taskModel.id);
+    const canStartAfterSwitch = task && !modelReady && canSwitchModelRuntime(taskModel.id);
+    const modelStarting = task && !modelReady && isModelRuntimeSwitching(taskModel.id);
+    els.startBtn.disabled = !task || !isTaskDetailLoaded(task) || isProcessing || (!modelReady && !canStartAfterSwitch);
     els.copyBtn.disabled = !task?.markdown;
     els.downloadBtn.disabled = !hasResult;
     const startLabel = startButtonLabel(task);
-    const showProcessing = isProcessing && task?.status === 'processing';
+    const showProcessing = (isProcessing && task?.status === 'processing') || modelStarting;
     els.startBtn.innerHTML = showProcessing
-        ? '<span class="spinner"></span>解析中'
+        ? `<span class="spinner"></span>${modelStarting ? '模型启动中' : '解析中'}`
         : `<svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></svg>${startLabel}`;
 }
 
 function startButtonLabel(task) {
     if (!task) return '开始解析';
+    const taskModel = getTaskModel(task);
+    if (!isModelRuntimeReady(taskModel.id)) return '启动模型并解析';
     if (task.status === 'completed') return '重新解析';
     if (task.status === 'error') return '重试解析';
     if (shouldResumeTask(task)) return '继续解析';

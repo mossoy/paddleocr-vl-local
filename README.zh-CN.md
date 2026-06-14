@@ -26,12 +26,14 @@ NVIDIA Compose 保留 4 个服务：
 - `paddleocr-ocr-api`
 - `paddleocr-vlm-server`
 
+单 GPU Docker 部署默认只热加载一个模型。`pandocr-web` 常驻运行，并通过 Docker socket 按需启停模型容器：选择 `PaddleOCR-VL 1.6` 会启动 `paddleocr-vlm-server` + `paddleocr-vl-api` 并停止 `paddleocr-ocr-api`；选择 `PP-OCRv6` 会反向切换。顶部 UI 会实时轮询显示模型就绪、启动中、待启动或失败状态。
+
 项目不再包含 rerank/reranker 服务，也不再在 Web 容器里安装 Paddle/PaddleX。
 
 ## 功能
 
 - 支持图片、PDF、PPT/PPTX、DOC/DOCX 上传。
-- 支持在 `PaddleOCR-VL 1.6` 文档解析和 `PP-OCRv6` 文字识别之间自由切换。
+- 支持在 `PaddleOCR-VL 1.6` 文档解析和 `PP-OCRv6` 文字识别之间自由切换；Docker 单 GPU 部署会按需启停模型，避免两个模型同时占用显存。
 - PDF 按页发送给 PaddleOCR-VL，便于对齐官方在线解析结果并稳定保留每页原始 JSON。
 - PP-OCRv6 结果使用接近官方的可视化文字层展示：左右页面对齐，上下/左右滚动和缩放同步，识别文字支持复制和纠正，同时保留原始 JSON。
 - 解析任务会持久化到本机 `data/tasks/`，刷新页面后仍可查看历史任务，删除按钮会同步删除本地记录。
@@ -79,16 +81,17 @@ Windows + NVIDIA 用户推荐直接使用一键部署脚本：
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
 docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
-docker compose --env-file env.txt up -d
+docker compose --env-file env.txt up -d --no-start
+docker compose --env-file env.txt start pandocr-web
 ```
 
 访问：
 
 - WebUI: http://localhost:8000
-- PaddleOCR-VL API health: http://localhost:8081/health
-- PP-OCRv6 API health: http://localhost:8082/health
+- PaddleOCR-VL API health: http://localhost:8081/health，仅在 `PaddleOCR-VL 1.6` 为活跃模型时可用。
+- PP-OCRv6 API health: http://localhost:8082/health，仅在 `PP-OCRv6` 为活跃模型时可用。
 
-Compose 默认只把 WebUI 和 PaddleOCR-VL API 绑定到 `127.0.0.1`，避免局域网内未授权访问。如果需要给其他机器访问，请先确认网络访问控制，再调整 `docker-compose.yml` 的端口绑定和 `PANDOCR_CORS_ORIGINS`。
+Compose 默认只把 WebUI 和 OCR API 绑定到 `127.0.0.1`，避免局域网内未授权访问。`pandocr-web` 会挂载 `/var/run/docker.sock` 来启停本 compose 文件里的模型容器，这等同于具备 Docker 主机管理权限；不要在没有额外访问控制的情况下把 WebUI 暴露给不可信网络。
 
 查看状态：
 
@@ -107,6 +110,9 @@ VLM_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-sm120-offline
 PANDOCR_GPU_DEVICE_ID=0
 PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
 PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
+PANDOCR_MODEL_CONTROL=docker
+PANDOCR_ACTIVE_MODEL_ON_START=paddleocr-vl-1.6
+PANDOCR_MODEL_SWITCH_TIMEOUT=1200
 PADDLE_REQUEST_TIMEOUT=3600
 PANDOCR_CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
 PANDOCR_MAX_UPLOAD_MB=512
@@ -238,6 +244,8 @@ PANDOCR_PORT=18000 make mac-up
 
 - `GET /`：WebUI 首页。
 - `GET /api/models`：返回可用模型和对应代理入口。
+- `GET /api/model-runtime`：返回当前活跃模型、就绪状态、容器状态和切换任务。
+- `POST /api/model-runtime/switch`：Docker 模式下启动目标模型容器并停止非活跃模型容器。
 - `GET /api/tasks`：读取本机持久化任务摘要列表，不返回大体积源文件和 OCR 结果。
 - `GET /api/tasks/{task_id}`：读取一个任务的完整详情。
 - `PUT /api/tasks/{task_id}`：保存一个任务到 `data/tasks/`。
@@ -280,7 +288,7 @@ PANDOCR_PORT=18000 make mac-up
 
 ## 本地开发
 
-本地运行 `server.py` 时，需要已有 PaddleOCR-VL 服务监听在 `http://localhost:8081/layout-parsing`。如需使用 PP-OCRv6，也需要启动 PaddleX OCR 服务监听在 `http://localhost:8082/ocr`，或设置 `PADDLE_OCR_SERVICE_URL`。
+本地在 Docker 外运行 `server.py` 时，请设置 `PANDOCR_MODEL_CONTROL=none`，并自行启动模型服务。需要已有 PaddleOCR-VL 服务监听在 `http://localhost:8081/layout-parsing`；如需使用 PP-OCRv6，也需要启动 PaddleX OCR 服务监听在 `http://localhost:8082/ocr`，或设置 `PADDLE_OCR_SERVICE_URL`。
 
 ```powershell
 pip install -r requirements.txt

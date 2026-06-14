@@ -11,7 +11,7 @@
 | `paddleocr-ocr-api` | PaddleX OCR API，默认使用 PP-OCRv6 | `8082:8080` |
 | `pandocr-web` | WebUI、FastAPI 代理、Office 转 PDF | `8000:8000` |
 
-rerank/reranker 服务已移除。Web 容器也不再挂载 Docker socket，不提供容器启停接口。
+rerank/reranker 服务已移除。单 GPU 部署默认只热加载一个模型：`pandocr-web` 挂载 Docker socket，并通过 Docker Engine API 启停本 compose 文件中的模型容器。选择 `PaddleOCR-VL 1.6` 会启动 `paddleocr-vlm-server` + `paddleocr-vl-api` 并停止 `paddleocr-ocr-api`；选择 `PP-OCRv6` 会反向切换。Docker socket 等同于宿主机管理权限，请勿把 WebUI 暴露给不可信网络。
 解析历史会通过 `./data:/app/data` 挂载保存到宿主机，默认路径为 `data/tasks/`。
 
 ## 推荐配置
@@ -33,6 +33,9 @@ VLM_IMAGE_TAG_SUFFIX=latest-nvidia-gpu-sm120-offline
 PANDOCR_GPU_DEVICE_ID=0
 PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
 PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
+PANDOCR_MODEL_CONTROL=docker
+PANDOCR_ACTIVE_MODEL_ON_START=paddleocr-vl-1.6
+PANDOCR_MODEL_SWITCH_TIMEOUT=1200
 PADDLE_REQUEST_TIMEOUT=3600
 ```
 
@@ -52,12 +55,13 @@ Windows + NVIDIA 用户推荐直接运行一键部署脚本：
 .\windows-one-click.bat
 ```
 
-脚本会自动选择环境文件、清理旧容器、启动服务并等待健康检查。手动部署命令如下：
+脚本会自动选择环境文件、清理旧容器、创建模型容器但只启动 WebUI，然后等待默认活跃模型健康。手动部署命令如下：
 
 ```powershell
 docker compose --env-file env.txt pull paddleocr-vlm-server paddleocr-vl-api
 docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
-docker compose --env-file env.txt up -d
+docker compose --env-file env.txt up -d --no-start
+docker compose --env-file env.txt start pandocr-web
 ```
 
 ## 健康检查
@@ -65,9 +69,11 @@ docker compose --env-file env.txt up -d
 ```powershell
 docker compose --env-file env.txt ps
 curl http://localhost:8000/api/models
+curl http://localhost:8000/api/model-runtime
 curl http://localhost:8081/health
-curl http://localhost:8082/health
 ```
+
+默认情况下只有 `PaddleOCR-VL 1.6` 会启动，`PP-OCRv6` 的健康检查不通是正常的。切到 `PP-OCRv6` 后，`8082/health` 会变为可用，`8081/health` 会进入 standby。
 
 `/api/models` 应返回：
 

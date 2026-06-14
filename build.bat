@@ -19,6 +19,9 @@ if not exist "env.txt" (
         echo PANDOCR_GPU_DEVICE_ID=0
         echo PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
         echo PPOCR_V6_MODEL_NAME=PP-OCRv6_medium
+        echo PANDOCR_MODEL_CONTROL=docker
+        echo PANDOCR_ACTIVE_MODEL_ON_START=paddleocr-vl-1.6
+        echo PANDOCR_MODEL_SWITCH_TIMEOUT=1200
         echo PADDLE_REQUEST_TIMEOUT=3600
     ) > env.txt
 )
@@ -32,7 +35,8 @@ docker compose --env-file env.txt build paddleocr-ocr-api pandocr-web
 echo Build complete.
 echo.
 echo Next:
-echo   docker compose --env-file env.txt up -d
+echo   docker compose --env-file env.txt up -d --no-start
+echo   docker compose --env-file env.txt start pandocr-web
 echo   docker compose --env-file env.txt logs -f
 echo   docker compose --env-file env.txt down
 echo.
